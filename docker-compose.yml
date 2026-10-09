@@ -1,7 +1,38 @@
 services:
-  3i-sales-funnel:
+  mysql:
+    image: mysql:8.4
+    container_name: toll-mysql
+    restart: unless-stopped
+    env_file:
+      - ./server/.env
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        export MYSQL_ROOT_PASSWORD="$${MYSQL_ROOT_PASSWORD:-$$DB_PASSWORD}"
+        export MYSQL_DATABASE="$${MYSQL_DATABASE:-$${DB_NAME:-3i_Sales_funnel}}"
+        if [ "$${DB_USER:-root}" = "root" ]; then
+          unset MYSQL_USER
+          unset MYSQL_PASSWORD
+        else
+          export MYSQL_USER="$${MYSQL_USER:-$$DB_USER}"
+          export MYSQL_PASSWORD="$${MYSQL_PASSWORD:-$$DB_PASSWORD}"
+        fi
+        exec docker-entrypoint.sh mysqld --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - toll_mysql:/var/lib/mysql
+      - ./toll.sql:/docker-entrypoint-initdb.d/toll.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$DB_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  coal-ash:
     image: node:18
-    container_name: 3i-sales-funnel
+    container_name: coal-ash
+    restart: unless-stopped
     working_dir: /app/server
     volumes:
       - ./server:/app/server
@@ -9,7 +40,14 @@ services:
     command: npm start
     env_file:
       - ./server/.env
-    expose:
-      - "4090"
+    environment:
+      DB_HOST: mysql
+      DB_PORT: "3306"
+    depends_on:
+      mysql:
+        condition: service_healthy
     ports:
       - "4090:4090"
+
+volumes:
+  toll_mysql:

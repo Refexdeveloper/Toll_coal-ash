@@ -7,6 +7,23 @@ export type Row = Record<string, unknown>
 
 let pool: Pool | null = null
 
+export async function waitForDatabase() {
+  const host = process.env.DB_HOST || 'localhost'
+  const deadline = Date.now() + 90_000
+  let last = 'database not ready'
+  while (Date.now() < deadline) {
+    try {
+      await getPool().query('SELECT 1')
+      return
+    } catch (error) {
+      last = error instanceof Error ? error.message : String(error)
+      console.log(`Waiting for MySQL at ${host}...`)
+      await new Promise((resolve) => setTimeout(resolve, 3000))
+    }
+  }
+  throw new Error(`Could not reach MySQL at ${host}: ${last}`)
+}
+
 export function getPool() {
   if (!pool) {
     pool = mysql.createPool({

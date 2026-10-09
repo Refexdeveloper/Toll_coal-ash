@@ -1,5 +1,6 @@
 import dotenv from 'dotenv'
 import { createApp } from './app.js'
+import { waitForDatabase } from './db/index.js'
 import { seed } from './db/seed.js'
 import { runPendingSchemaMigrations } from './services/schemaMigrate.js'
 import { ensureAppColumns } from './db/ensure.js'
@@ -13,6 +14,7 @@ const serveClient = process.env.SERVE_CLIENT === 'true'
 const publicApp = (process.env.PUBLIC_APP_URL || process.env.FRONTEND_URL || '').replace(/\/$/, '')
 
 try {
+  await waitForDatabase()
   const result = await runPendingSchemaMigrations()
   console.log(`Schema ready — ${result.table_count} tables`)
   await ensureAppColumns()

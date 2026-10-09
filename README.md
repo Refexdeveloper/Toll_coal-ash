@@ -55,6 +55,15 @@ Signed-in users open **FASTag** in the sidebar.
 
 Set `FASTAG_ACCESS_TOKEN` in `server/.env`. The browser never receives that token.
 
+## Docker
+
+`docker compose up` starts MySQL as the host name `mysql`, then starts the app. The app reads `DB_USER`, `DB_PASSWORD`, and `DB_NAME` from `server/.env`. The first start loads `toll.sql`.
+
+```bash
+docker compose down
+docker compose up -d
+```
+
 ## Local Vite (optional)
 
 Terminal 1: `cd server && npm run dev`  
