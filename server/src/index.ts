@@ -1,10 +1,6 @@
 import dotenv from 'dotenv'
 import { createApp } from './app.js'
 import { waitForDatabase } from './db/index.js'
-import { seed } from './db/seed.js'
-import { runPendingSchemaMigrations } from './services/schemaMigrate.js'
-import { ensureAppColumns } from './db/ensure.js'
-import { importFastagJsonIfRicher } from './db/importFastagJson.js'
 
 dotenv.config()
 
@@ -15,13 +11,9 @@ const publicApp = (process.env.PUBLIC_APP_URL || process.env.FRONTEND_URL || '')
 
 try {
   await waitForDatabase()
-  const result = await runPendingSchemaMigrations()
-  console.log(`Schema ready — ${result.table_count} tables`)
-  await ensureAppColumns()
-  await seed()
-  await importFastagJsonIfRicher()
+  console.log('Database ready')
 } catch (e) {
-  console.error('Schema migrate failed:', e instanceof Error ? e.message : e)
+  console.error('Database connection failed:', e instanceof Error ? e.message : e)
   process.exit(1)
 }
 

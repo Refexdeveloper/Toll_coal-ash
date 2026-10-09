@@ -57,7 +57,19 @@ Set `FASTAG_ACCESS_TOKEN` in `server/.env`. The browser never receives that toke
 
 ## Docker
 
-`docker compose up` starts MySQL as the host name `mysql`, then starts the app. The app reads `DB_USER`, `DB_PASSWORD`, and `DB_NAME` from `server/.env`. The first start loads `toll.sql`.
+The app joins the external Docker network `proxy`, where the host name `mysql` already runs. On the server, `server/.env` uses that host, the same way as the other app:
+
+```
+DB_HOST=mysql
+DB_PORT=3306
+DB_NAME=3i_Sales_funnel
+DB_USER=root
+DB_PASSWORD=rootpassword
+MYSQL_ROOT_PASSWORD=itam_root_change_me
+MYSQL_PUBLISH_PORT=3307
+```
+
+The database is already loaded from `toll.sql`. Startup connects to it and does not migrate or reseed.
 
 ```bash
 docker compose down
