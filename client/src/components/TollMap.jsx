@@ -218,6 +218,7 @@ export default function TollMap({ points, picked, onPick }) {
               src={tile.url}
               alt=""
               draggable={false}
+              referrerPolicy="origin"
               style={{ left: tile.left, top: tile.top }}
             />
           ))}

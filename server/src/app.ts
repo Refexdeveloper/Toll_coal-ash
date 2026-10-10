@@ -23,6 +23,7 @@ export function createApp() {
   const useHttps = process.env.FORCE_HTTPS === 'true'
   app.use(helmet({
     hsts: useHttps ? undefined : false,
+    referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
     crossOriginOpenerPolicy: useHttps ? { policy: 'same-origin' } : false,
     contentSecurityPolicy: {
       useDefaults: true,
