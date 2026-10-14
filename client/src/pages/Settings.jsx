@@ -33,11 +33,6 @@ export default function Settings() {
           </button>
         ) : null}
       </Box>
-      <Box title="Application">
-        <p className="text-muted rm-m-0">
-          Database <code>3i_Sales_funnel</code> · JWT session · client build served from Express when <code>SERVE_CLIENT=true</code>.
-        </p>
-      </Box>
     </div>
   );
 }

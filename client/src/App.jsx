@@ -16,8 +16,11 @@ import Shell from "./components/Shell.jsx";
 // import Lost from "./pages/Lost.jsx";
 // import Reports from "./pages/Reports.jsx";
 // import Settings from "./pages/Settings.jsx";
-// import Users from "./pages/Users.jsx";
 import Fastag from "./pages/Fastag.jsx";
+import RouteMaster from "./pages/RouteMaster.jsx";
+import Admin from "./pages/Admin.jsx";
+import GpsTracking from "./pages/GpsTracking.jsx";
+import TripChecks from "./pages/TripChecks.jsx";
 
 function safeAppNext(raw) {
   if (!raw) return null;
@@ -50,6 +53,13 @@ function RequirePasswordReady({ children }) {
   return children;
 }
 
+function RequireModule({ permission, children }) {
+  const { can, loading } = useAuth();
+  if (loading) return <p className="p-10 text-center text-slate-500">Loading…</p>;
+  if (!can(permission)) return <p className="p-10 text-center">You do not have access to this module.</p>;
+  return children;
+}
+
 function RequireAdmin({ children }) {
   const { isAdmin, loading } = useAuth();
   if (loading) return <p className="p-10 text-center text-slate-500">Loading…</p>;
@@ -67,7 +77,7 @@ function LoginRoute() {
         const u = await login(email, password);
         const dest = u?.must_change_password
           ? `/account/password${next ? `?next=${encodeURIComponent(next)}` : ""}`
-          : (next || "/fastag");
+          : (next || "/routes");
         window.location.replace(dest);
       }}
     />
@@ -95,23 +105,16 @@ function AppRoutes() {
           </RequireAuth>
         }
       >
-        <Route path="/" element={<Navigate to="/fastag" replace />} />
-        {/* <Route path="/" element={<Dashboard region={region} />} />
-        <Route path="/funnel" element={<Funnel region={region} />} />
-        <Route path="/opportunities" element={<Opportunities region={region} search={search} />} />
-        <Route path="/opportunities/:id/edit" element={<OpportunityEdit />} />
-        <Route path="/opportunities/:id" element={<OpportunityView />} />
-        <Route path="/add" element={<AddOpportunity />} />
-        <Route path="/pipeline" element={<Pipeline region={region} />} />
-        <Route path="/forecast" element={<Forecast region={region} />} />
-        <Route path="/lost" element={<Lost region={region} />} />
-        <Route path="/reports" element={<Reports region={region} />} />
-        <Route path="/settings" element={<RequireAdmin><Settings /></RequireAdmin>} />
-        <Route path="/users" element={<RequireAdmin><Users /></RequireAdmin>} /> */}
-        <Route path="/fastag" element={<Fastag />} />
+        <Route path="/" element={<Navigate to="/routes" replace />} />
+        <Route path="/routes" element={<RequireModule permission="routes"><RouteMaster /></RequireModule>} />
+        <Route path="/fastag" element={<RequireModule permission="fastag"><Fastag /></RequireModule>} />
+        <Route path="/checks" element={<RequireModule permission="checks"><TripChecks /></RequireModule>} />
+        <Route path="/gps" element={<RequireModule permission="gps"><GpsTracking /></RequireModule>} />
+        <Route path="/users" element={<Navigate to="/admin" replace />} />
+        <Route path="/admin" element={<RequireAdmin><Admin /></RequireAdmin>} />
         <Route path="/account/profile" element={<AccountProfile />} />
         <Route path="/account/password" element={<AccountPassword />} />
-        <Route path="*" element={<Navigate to="/fastag" replace />} />
+        <Route path="*" element={<Navigate to="/routes" replace />} />
       </Route>
     </Routes>
   );

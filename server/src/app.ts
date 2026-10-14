@@ -13,6 +13,9 @@ import accountRouter from './routes/account.js'
 import usersRouter from './routes/users.js'
 import salesRouter from './routes/sales.js'
 import fastagRouter from './routes/fastag.js'
+import routesRouter from './routes/routes.js'
+import gpsRouter from './routes/gps.js'
+import adminRouter from './routes/admin.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const clientOutPath = path.resolve(__dirname, '../../client/out')
@@ -32,6 +35,7 @@ export function createApp() {
         'font-src': ["'self'", 'https:', 'data:', 'https://fonts.gstatic.com'],
         'style-src': ["'self'", 'https:', "'unsafe-inline'", 'https://fonts.googleapis.com'],
         'img-src': ["'self'", 'data:', 'blob:', 'https:'],
+        'frame-src': ["'self'", 'https:', 'http:'],
         'script-src': ["'self'", "'unsafe-inline'"],
         'connect-src': ["'self'", 'http:', 'https:'],
       },
@@ -77,6 +81,9 @@ export function createApp() {
   api.use('/account', accountRouter)
   api.use('/users', usersRouter)
   api.use('/fastag', fastagRouter)
+  api.use('/routes', routesRouter)
+  api.use('/gps', gpsRouter)
+  api.use('/admin', adminRouter)
   api.use(salesRouter)
   app.use('/api/v1', api)
 

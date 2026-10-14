@@ -20,29 +20,20 @@ function useIsNarrow() {
 }
 
 const NAV = [
-  // { to: "/", label: "Dashboard", icon: "fa-chart-line", end: true },
-  // { to: "/funnel", label: "Sales Funnel", icon: "fa-filter" },
-  // { to: "/opportunities", label: "Opportunities", icon: "fa-briefcase" },
-  // { to: "/add", label: "Add Opportunity", icon: "fa-plus-circle" },
-  // { to: "/pipeline", label: "My Pipeline", icon: "fa-columns" },
-  // { to: "/forecast", label: "Forecast", icon: "fa-chart-area" },
-  // { to: "/lost", label: "Lost Business", icon: "fa-user-times" },
-  // { to: "/reports", label: "Reports", icon: "fa-chart-bar" },
-  { to: "/fastag", label: "FASTag", icon: "fa-road" },
+  { to: "/routes", label: "Route Master", icon: "fa-route", permission: "routes" },
+  { to: "/fastag", label: "FASTag", icon: "fa-road", permission: "fastag" },
+  { to: "/checks", label: "Trip checks", icon: "fa-flag", permission: "checks" },
+  { to: "/gps", label: "GPS Tracking", icon: "fa-satellite-dish", permission: "gps" },
+  { to: "/admin", label: "Admin", icon: "fa-user-shield", permission: "users" },
 ];
 
 const TITLES = {
-  // "/": ["Dashboard", "Pipeline performance"],
-  // "/funnel": ["Sales Funnel", "Enquiry to closure"],
-  // "/opportunities": ["Opportunities", "All live records"],
-  // "/add": ["Add Opportunity", "Capture a new enquiry"],
-  // "/pipeline": ["My Pipeline", "Drag cards to update stage"],
-  // "/forecast": ["Forecast", "Weighted pipeline"],
-  // "/lost": ["Lost Business", "Lost and cancelled deals"],
-  // "/reports": ["Reports", "Pipeline analytics"],
+  "/routes": ["Route Master", "Route management and toll plaza mapping"],
   "/fastag": ["FASTag", "Vehicle toll lookups"],
-  // "/settings": ["Settings", "Data quality and app"],
-  // "/users": ["App users", "Access to the sales funnel"],
+  "/checks": ["Trip checks", "Multi-project vehicles and skipped tolls"],
+  "/gps": ["GPS Tracking", "Live location & historical route playback"],
+  "/admin": ["Admin", "Roles, users, and database updates"],
+  "/users": ["Admin", "Roles, users, and database updates"],
   "/account/profile": ["Profile", "Your account"],
   "/account/password": ["Password", "Update sign-in"],
 };
@@ -57,7 +48,7 @@ export default function Shell({ region, setRegion, onSearch }) {
   const [q, setQ] = useState("");
   const location = useLocation();
   const navigate = useNavigate();
-  const { user, logout, isAdmin, displayName } = useAuth();
+  const { user, logout, can, displayName, isAdmin } = useAuth();
   const path = location.pathname;
   const [title, subtitle] = path.endsWith("/edit") && path.startsWith("/opportunities/")
     ? ["Edit opportunity", "Update record"]
@@ -94,13 +85,10 @@ export default function Shell({ region, setRegion, onSearch }) {
     navigate("/opportunities");
   };
 
-  const items = [
-    ...NAV,
-    // ...(isAdmin ? [
-    //   { to: "/users", label: "App users", icon: "fa-user-shield" },
-    //   { to: "/settings", label: "Settings", icon: "fa-cog" },
-    // ] : []),
-  ];
+  const items = NAV.filter((item) => can(item.permission));
+  const hour = new Date().getHours();
+  const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
+  const roleLabel = user?.jobtitle || (isAdmin ? "Administrator" : "GPS Team");
 
   return (
     <div className={`wrapper ${collapsed ? "sidebar-collapse" : ""} ${!collapsed ? "sidebar-open" : ""}${isNarrow ? " is-narrow" : ""}`}>
@@ -108,11 +96,9 @@ export default function Shell({ region, setRegion, onSearch }) {
         <button type="button" className="sidebar-backdrop" aria-label="Close menu" onClick={closeDrawer} />
       ) : null}
       <header className="main-header">
-        {/* <NavLink to="/" className="logo" aria-label="3i MedTech" onClick={closeDrawer}>
-          <span className="header-logo">
-            <img src="/3i_mark.png?v=5" alt="" />
-          </span>
-        </NavLink> */}
+        <NavLink to="/routes" className="logo" aria-label="Refex One" onClick={closeDrawer} style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "0 14px", height: "100%", background: "#fff", textDecoration: "none" }}>
+          <img src="/logo.png" alt="Refex One" style={{ height: 36, width: "auto", maxWidth: 175, objectFit: "contain" }} />
+        </NavLink>
         <nav className="navbar">
           <button
             type="button"
@@ -182,15 +168,25 @@ export default function Shell({ region, setRegion, onSearch }) {
         </ul>
       </aside>
 
-      <div className="content-wrapper">
-        <section className="content-header">
-          <h1>
-            {title}
-            {subtitle ? <small>{subtitle}</small> : null}
-          </h1>
-          <div className="content-header__right">
+      <div className="content-wrapper toll-stage">
+        <section className="tfx-hero">
+          <div className="tfx-bubbles" aria-hidden="true">
+            <i /><i /><i /><i /><i /><i /><i />
+          </div>
+          <div className="tfx-hero-content">
+            <div className="tfx-hi">
+              {greeting}, <span className="tfx-wave" aria-hidden="true">👋</span>
+            </div>
+            <h1><span className="tfx-shimmer">{displayName}</span></h1>
+            <p>
+              {subtitle || title}
+              <span className="tfx-role-inline"> · {roleLabel}</span>
+            </p>
+          </div>
+          <div className="tfx-period">
+            <p className="tfx-period-lbl">{title}</p>
             <ol className="breadcrumb">
-              <li><NavLink to="/fastag">Home</NavLink></li>
+              <li><NavLink to="/routes">Home</NavLink></li>
               <li>{title}</li>
             </ol>
           </div>

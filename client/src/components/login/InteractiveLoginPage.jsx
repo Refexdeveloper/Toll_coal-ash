@@ -78,11 +78,10 @@ export default function InteractiveLoginPage({ onSubmit: onSubmitProp }) {
             transition={{ duration: 0.55, ease: [0.22, 1, 0.36, 1], delay: 0.12 }}
           >
             <div className="em-card-head em-card-head--brand">
-              {/* <img className="em-card-logo" src="/3i_logo.png" alt="3i MedTech" /> */}
+              <img className="em-card-logo" src="/logo.png" alt="Refex One" />
               <div>
                 <h2>Welcome back</h2>
-                {/* <p>Sign in to the 3i sales pipeline.</p> */}
-                <p>Sign in to look up FASTag toll data.</p>
+                <p>Sign in to Refex One FASTag & Toll Portal</p>
               </div>
             </div>
 

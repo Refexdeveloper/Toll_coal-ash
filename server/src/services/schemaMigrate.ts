@@ -51,18 +51,16 @@ export async function runPendingSchemaMigrations(): Promise<SchemaMigrateResult>
     for (const file of files) {
       const versionName = file.replace(/\.sql$/, '')
 
-      if (/^\d{3}_/.test(file) && !file.startsWith('001')) {
-        const [rows] = await root.query<mysql.RowDataPacket[]>(
-          `SELECT id FROM schema_migrations WHERE version = ? LIMIT 1`,
-          [versionName],
-        ).catch(() => [[] as mysql.RowDataPacket[]])
-        if (rows.length) {
-          skipped.push(versionName)
-          continue
-        }
-      }
+    const [rows] = await root.query<mysql.RowDataPacket[]>(
+      `SELECT id FROM schema_migrations WHERE version = ? LIMIT 1`,
+      [versionName],
+    ).catch(() => [[] as mysql.RowDataPacket[]])
+    if (rows.length) {
+      skipped.push(versionName)
+      continue
+    }
 
-      let sql = fs.readFileSync(path.join(dir, file), 'utf8')
+    let sql = fs.readFileSync(path.join(dir, file), 'utf8')
         .replace(/CREATE DATABASE[\s\S]*?;/i, '')
         .replace(/USE\s+`?[\w]+`?\s*;/gi, '')
       try {

@@ -28,8 +28,14 @@ export async function logAction(opts: {
   }
 }
 
-export async function listActivity(limit = 200) {
-  const safeLimit = Math.max(1, Math.min(500, limit))
+export async function countActivity() {
+  const row = await all<{ c: number }>('SELECT COUNT(*) AS c FROM action_logs')
+  return Number(row[0]?.c || 0)
+}
+
+export async function listActivity(limit = 10, offset = 0) {
+  const safeLimit = Math.max(1, Math.min(100, Math.floor(limit)))
+  const safeOffset = Math.max(0, Math.floor(offset))
   return all(`
     SELECT a.id, a.created_at AS at, a.user_id,
            COALESCE(a.email, u.email) AS email,
@@ -37,6 +43,6 @@ export async function listActivity(limit = 200) {
     FROM action_logs a
     LEFT JOIN users u ON u.id = a.user_id
     ORDER BY a.id DESC
-    LIMIT ${safeLimit}
+    LIMIT ${safeLimit} OFFSET ${safeOffset}
   `)
 }

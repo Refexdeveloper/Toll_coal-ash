@@ -50,10 +50,12 @@ export async function request(path, options = {}) {
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const msg = Array.isArray(data.messages)
-      ? data.messages.join(", ")
-      : data.messages || data.message || data.error || res.statusText;
-    throw new Error(String(msg));
+    const messages = Array.isArray(data.messages)
+      ? data.messages.map((item) => String(item))
+      : [String(data.messages || data.message || data.error || res.statusText)];
+    const error = new Error(messages.join("\n"));
+    error.messages = messages;
+    throw error;
   }
   return data;
 }
@@ -97,13 +99,29 @@ export const api = {
   quality: () => request("/quality"),
   reset: () => request("/reset", { method: "POST" }),
   users: () => request("/users"),
+  adminRoles: () => request("/admin/roles"),
+  saveAdminRoles: (gps) => request("/admin/roles", { method: "PUT", json: { gps } }),
+  runMigrations: () => request("/admin/migrate", { method: "POST" }),
   createUser: (body) => request("/users", { method: "POST", json: body }),
   patchUser: (id, body) => request(`/users/${id}`, { method: "PATCH", json: body }),
   deleteUser: (id) => request(`/users/${id}`, { method: "DELETE" }),
+  resetUserPassword: (id, password, mustChange = false) =>
+    request(`/users/${id}/reset-password`, {
+      method: "POST",
+      json: { password, must_change_password: mustChange },
+    }),
+  routes: () => request("/routes"),
+  route: (id) => request(`/routes/${encodeURIComponent(id)}`),
+  createRoute: (body) => request("/routes", { method: "POST", json: body }),
+  updateRoute: (id, body) => request(`/routes/${encodeURIComponent(id)}`, { method: "PUT", json: body }),
+  deleteRoute: (id) => request(`/routes/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  fetchTollsForRoute: (body) => request("/routes/fetch-tolls", { method: "POST", json: body }),
+  tollPlazasDirectory: () => request("/routes/directory/toll-plazas"),
+  savedTolls: () => request("/routes/directory/saved-tolls"),
   profile: () => request("/account/profile"),
   saveProfile: (body) => request("/account/profile", { method: "PATCH", json: body }),
   changePassword: (body) => request("/account/password", { method: "POST", json: body }),
-  fastagActivity: () => request("/fastag/activity"),
+  fastagActivity: (limit = 8, offset = 0) => request(`/fastag/activity?limit=${limit}&offset=${offset}`),
   fastagBatches: () => request("/fastag/batches"),
   fastagBatch: (id) => request("/fastag/batches/" + encodeURIComponent(id)),
   fastagUpload: (file) => {
@@ -111,10 +129,67 @@ export const api = {
     body.append("file", file);
     return request("/fastag/batches", { method: "POST", body });
   },
+  fastagPreview: (file) => {
+    const body = new FormData();
+    body.append("file", file);
+    return request("/fastag/preview", { method: "POST", body });
+  },
+  fastagRejectedExport: (payload) => request("/fastag/rejected-export", { method: "POST", json: payload, download: true }),
   fastagFetch: (id) => request("/fastag/batches/" + encodeURIComponent(id) + "/fetch", { method: "POST" }),
   fastagRetryFailed: (id) => request("/fastag/batches/" + encodeURIComponent(id) + "/retry-failed", { method: "POST" }),
-  fastagLookup: (vehicleRegNo) => request("/fastag/lookup", { method: "POST", json: { vehicleRegNo } }),
-  fastagExport: (id) => request("/fastag/batches/" + encodeURIComponent(id) + "/export", { download: true }),
+  fastagLookup: (vehicleRegNo, sites = {}) => request("/fastag/lookup", {
+    method: "POST",
+    json: {
+      vehicleRegNo,
+      projectName: sites.projectName || "",
+      challanId: sites.challanId || "",
+      tripId: sites.tripId || "",
+      fromLocation: sites.fromLocation || "",
+      toLocation: sites.toLocation || "",
+      fromDate: sites.fromDate || "",
+      toDate: sites.toDate || "",
+    },
+  }),
+  fastagRecords: (vehicle) => request("/fastag/records?vehicle=" + encodeURIComponent(vehicle)),
+  fastagEntered: ({ vehicle = "", challan = "", project = "", date = "" } = {}) => {
+    const params = new URLSearchParams();
+    if (vehicle) params.set("vehicle", vehicle);
+    if (challan) params.set("challan", challan);
+    if (project) params.set("project", project);
+    if (date) params.set("date", date);
+    return request("/fastag/entered?" + params.toString());
+  },
+  fastagAudit: (vehicle = "") => request("/fastag/audit?vehicle=" + encodeURIComponent(vehicle)),
+  fastagAuditExport: (vehicle = "", focus = "", keys = []) => {
+    if (keys.length) {
+      return request("/fastag/audit/export", { method: "POST", json: { vehicle, focus, keys }, download: true });
+    }
+    const params = new URLSearchParams();
+    if (vehicle) params.set("vehicle", vehicle);
+    if (focus) params.set("focus", focus);
+    const query = params.toString();
+    return request("/fastag/audit/export" + (query ? `?${query}` : ""), { download: true });
+  },
+  fastagExport: (id, query = "") => request("/fastag/batches/" + encodeURIComponent(id) + "/export" + (query ? `?${query}` : ""), { download: true }),
+  fastagSelectedExport: (ids) => request("/fastag/reads/export", { method: "POST", json: { ids }, download: true }),
+  routeExport: (ids) => request("/routes/export", { method: "POST", json: { ids }, download: true }),
+  savedTollExport: (names) => request("/routes/directory/saved-tolls/export", { method: "POST", json: { names }, download: true }),
+  gpsExport: (ids) => request("/gps/export", { method: "POST", json: { ids }, download: true }),
+  userExport: (ids) => request("/users/export", { method: "POST", json: { ids }, download: true }),
+  importRoutes: (file) => {
+    const body = new FormData();
+    body.append("file", file);
+    return request("/routes/import", { method: "POST", body });
+  },
+  downloadRouteTemplate: () => request("/routes/sample-template", { download: true }),
+  // GPS Tracking
+  gpsLive: (vno, sync = false) => request(`/gps/live?vno=${encodeURIComponent(vno)}${sync ? '&sync=1' : ''}`),
+  gpsHistory: (vno, from = "", to = "", limit = 500) =>
+    request(`/gps/history?vno=${encodeURIComponent(vno)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&limit=${limit}`),
+  gpsVehicles: () => request("/gps/vehicles"),
+  gpsSync: () => request("/gps/sync", { method: "POST" }),
+  gpsSave: (payload) => request("/gps/save", { method: "POST", json: typeof payload === "string" ? { vno: payload } : payload }),
+  gpsPing: (payload) => request("/gps/ping", { method: "POST", json: payload }),
 };
 
 export function formatINR(lakhs) {

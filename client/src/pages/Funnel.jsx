@@ -27,7 +27,7 @@ export default function Funnel({ region }) {
 
   return (
     <div className="rm-page">
-      <Box title="Process funnel" tools={<span className="text-muted">Click a stage to inspect records</span>}>
+      <Box title="Process funnel">
         <FunnelBars
           onSelect={(item) => openStage(item.id, item.title)}
           items={[

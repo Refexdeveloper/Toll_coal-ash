@@ -17,10 +17,10 @@ function AuthShell({ title, children }) {
         <section className="em-auth">
           <div className="em-card">
             <div className="em-card-head em-card-head--brand">
-              {/* <img className="em-card-logo" src="/3i_logo.png" alt="3i MedTech" /> */}
+              <img className="em-card-logo" src="/logo.png" alt="Refex One" />
               <div>
                 <h2>{title}</h2>
-                {/* <p>3i Sales Funnel</p> */}
+                <p>Refex One</p>
               </div>
             </div>
             {children}
@@ -54,9 +54,6 @@ export function ForgotPasswordPage() {
 
   return (
     <AuthShell title="Forgot password">
-      <p className="em-card-head" style={{ display: "block", marginBottom: 14 }}>
-        <span style={{ fontSize: 13, color: "#64748b", fontWeight: 500 }}>Enter your work email and we will send a reset link.</span>
-      </p>
       {error ? <div className="em-error" role="alert">{error}</div> : null}
       {okMsg ? <div className="em-ok">{okMsg}</div> : null}
       {!okMsg && (

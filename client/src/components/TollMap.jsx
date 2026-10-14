@@ -134,7 +134,7 @@ export default function TollMap({ points, picked, onPick }) {
         });
       }
     }
-    const markers = points.map((point) => {
+    const placed = points.map((point) => {
       const projected = project(point.lat, point.lng, view.zoom);
       return {
         ...point,
@@ -143,6 +143,36 @@ export default function TollMap({ points, picked, onPick }) {
         active: samePoint(point, picked),
       };
     });
+    const markers = [];
+    const used = new Array(placed.length).fill(false);
+    for (let i = 0; i < placed.length; i += 1) {
+      if (used[i]) continue;
+      const group = [placed[i]];
+      used[i] = true;
+      for (let j = i + 1; j < placed.length; j += 1) {
+        if (used[j]) continue;
+        const dx = placed[i].left - placed[j].left;
+        const dy = placed[i].top - placed[j].top;
+        if (dx * dx + dy * dy <= 40 * 40) {
+          used[j] = true;
+          group.push(placed[j]);
+        }
+      }
+      if (group.length === 1) {
+        markers.push(group[0]);
+        continue;
+      }
+      markers.push({
+        key: `cluster-${group.map((item) => item.key).join("|")}`,
+        cluster: true,
+        count: group.reduce((sum, item) => sum + (item.count || 1), 0),
+        lat: group.reduce((sum, item) => sum + item.lat, 0) / group.length,
+        lng: group.reduce((sum, item) => sum + item.lng, 0) / group.length,
+        left: group.reduce((sum, item) => sum + item.left, 0) / group.length,
+        top: group.reduce((sum, item) => sum + item.top, 0) / group.length,
+        name: `${group.length} toll locations`,
+      });
+    }
     let pickedMarker = null;
     if (picked && !markers.some((marker) => marker.active)) {
       const projected = project(picked.lat, picked.lng, view.zoom);
@@ -226,10 +256,20 @@ export default function TollMap({ points, picked, onPick }) {
             <button
               key={marker.key}
               type="button"
-              className={`ft-pin${marker.active ? " is-picked" : ""}`}
+              className={`ft-pin${marker.cluster ? " is-cluster" : ""}${marker.active ? " is-picked" : ""}`}
               style={{ left: marker.left, top: marker.top }}
               title={`${marker.name} (${formatCoord(marker.lat)}, ${formatCoord(marker.lng)})`}
-              onClick={() => onPick?.(marker)}
+              onClick={(event) => {
+                event.stopPropagation();
+                if (marker.cluster) {
+                  setView((current) => ({
+                    center: { lat: marker.lat, lng: marker.lng },
+                    zoom: Math.min(MAX_ZOOM, current.zoom + 2),
+                  }));
+                  return;
+                }
+                onPick?.(marker);
+              }}
             >
               <span>{marker.count}</span>
             </button>
@@ -238,7 +278,7 @@ export default function TollMap({ points, picked, onPick }) {
             <span className="ft-pin is-picked is-free" style={{ left: scene.pickedMarker.left, top: scene.pickedMarker.top }} />
           ) : null}
           {!points.length ? (
-            <p className="ft-map-empty">No toll coordinates in this filter. Click the map to pick a location.</p>
+            <p className="ft-map-empty">No toll coordinates</p>
           ) : null}
           <div className="ft-map-zoom">
             <button type="button" aria-label="Zoom in" onClick={() => zoomBy(1)}>+</button>
@@ -251,14 +291,15 @@ export default function TollMap({ points, picked, onPick }) {
           {picked ? (
             <>
               <strong>{picked.label || picked.name || "Location"}</strong>
+              {picked.vehicle ? <span>{picked.vehicle}</span> : null}
+              {picked.when ? <span>{picked.when}</span> : null}
+              {picked.direction ? <span>{picked.direction}</span> : null}
               <span>{formatCoord(picked.lat)}, {formatCoord(picked.lng)}</span>
               <a href={mapsHref(picked.lat, picked.lng)} target="_blank" rel="noreferrer">
                 Open in Google Maps
               </a>
             </>
-          ) : (
-            <span className="text-muted">Click a toll pin, a geocode link, or the map to pick coordinates.</span>
-          )}
+          ) : null}
         </div>
       </div>
       <div className="ft-plaza-list">
@@ -270,9 +311,13 @@ export default function TollMap({ points, picked, onPick }) {
             className={`ft-plaza${samePoint(point, picked) ? " is-picked" : ""}`}
             onClick={() => onPick?.(point)}
           >
-            <strong>{point.name}</strong>
+            <strong>{point.name || point.title}</strong>
             <span>{`${formatCoord(point.lat)}, ${formatCoord(point.lng)}`}</span>
-            <em>{`${point.count} ${point.count === 1 ? "read" : "reads"} · ${point.vehicles.length} ${point.vehicles.length === 1 ? "vehicle" : "vehicles"}`}</em>
+            {point.vehicles ? (
+              <em>{`${point.count || 1} ${point.count === 1 ? "read" : "reads"} · ${point.vehicles.length} ${point.vehicles.length === 1 ? "vehicle" : "vehicles"}`}</em>
+            ) : point.subtitle ? (
+              <em>{point.subtitle}</em>
+            ) : null}
           </button>
         ))}
         {!points.length ? <p className="text-muted">No plazas match the current filters.</p> : null}

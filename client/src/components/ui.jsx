@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 
@@ -46,22 +46,142 @@ export function SmallBox({ to, count, label, tone = "blue", icon, footer }) {
   );
 }
 
+const KPI_BARS = [22, 34, 28, 46, 40, 62, 88];
+const KPI_TONE = {
+  green: "tone-green",
+  orange: "tone-orange",
+  rose: "tone-rose",
+  teal: "tone-teal",
+  slate: "tone-slate",
+  amber: "tone-amber",
+  navy: "tone-navy",
+  blue: "tone-navy",
+};
+
+function asNumber(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const cleaned = value.replace(/,/g, "").trim();
+    if (/^\d+$/.test(cleaned)) return Number(cleaned);
+  }
+  return null;
+}
+
+function useCountUp(target) {
+  const [n, setN] = useState(0);
+  useEffect(() => {
+    if (target == null) return undefined;
+    let raf = 0;
+    const start = performance.now();
+    const tick = (now) => {
+      const t = Math.min(1, (now - start) / 900);
+      setN(Math.round(target * (1 - (1 - t) ** 3)));
+      if (t < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [target]);
+  return n;
+}
+
+function tiltCard(event) {
+  if (!window.matchMedia("(hover: hover)").matches) return;
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const el = event.currentTarget;
+  const rect = el.getBoundingClientRect();
+  const x = (event.clientX - rect.left) / rect.width;
+  const y = (event.clientY - rect.top) / rect.height;
+  el.style.setProperty("--mx", `${x * 100}%`);
+  el.style.setProperty("--my", `${y * 100}%`);
+  el.classList.add("tilting");
+  el.style.transform = `perspective(900px) rotateX(${(0.5 - y) * 8}deg) rotateY(${(x - 0.5) * 10}deg) translateY(-6px)`;
+}
+
+function untiltCard(event) {
+  event.currentTarget.classList.remove("tilting");
+  event.currentTarget.style.transform = "";
+}
+
+function pulseCard(event) {
+  const el = event.currentTarget;
+  el.classList.remove("fx-bounce");
+  void el.offsetWidth;
+  el.classList.add("fx-bounce");
+}
+
 export function Kpi({ label, value, hint, icon, tone, active, onClick, to }) {
-  const className = `rm-kpi${tone ? ` rm-kpi--${tone}` : ""}${active ? " is-active" : ""}${onClick || to ? "" : " is-static"}`;
-  const card = (
-    <div className={className}>
-      <span className="rm-kpi__label">{label}</span>
-      <span className="rm-kpi__value">{value}</span>
-      <span className="rm-kpi__hint">{hint}</span>
-      <span className="rm-kpi__icon" aria-hidden><i className={`fas ${icon}`} /></span>
-    </div>
+  const numeric = asNumber(value);
+  const counted = useCountUp(numeric);
+  const display = numeric == null ? value : counted.toLocaleString("en-IN");
+  const live = typeof hint === "string" && /live|in transit|running/i.test(hint);
+  const className = [
+    "tfx-kpi",
+    KPI_TONE[tone] || "",
+    active ? "selected" : "",
+    onClick || to ? "" : "is-static",
+    numeric == null ? "is-text" : "",
+  ].filter(Boolean).join(" ");
+  const body = (
+    <>
+      <span className="tfx-kpi-shine" />
+      <span className="tfx-kpi-spot" />
+      <div className="tfx-kpi-head">
+        <div className="tfx-kpi-icon" aria-hidden="true">
+          <i className={`fas ${icon || "fa-chart-line"}`} />
+        </div>
+        <div className="tfx-kpi-title">
+          <h3>{label}</h3>
+          {hint ? (
+            <span>
+              {live ? <i className="tfx-live-dot" /> : null}
+              {hint}
+            </span>
+          ) : null}
+        </div>
+      </div>
+      <div className="tfx-kpi-body">
+        <div>
+          <div className="tfx-kpi-num">{display}</div>
+        </div>
+        <div className="tfx-kpi-bars" aria-hidden="true">
+          {KPI_BARS.map((height, index) => (
+            <i key={height + index} style={{ "--h": `${height}%`, "--n": index }} />
+          ))}
+        </div>
+      </div>
+      <div className="tfx-kpi-progress" aria-hidden="true">
+        <div className="track"><span className="fill" style={{ "--p": active ? "100%" : "78%" }} /></div>
+      </div>
+    </>
   );
-  if (to) return <Link to={to} className="rm-kpi-link">{card}</Link>;
-  if (!onClick) return card;
+  if (to) {
+    return (
+      <Link to={to} className={className} onMouseMove={tiltCard} onMouseLeave={untiltCard} onClick={pulseCard}>
+        {body}
+      </Link>
+    );
+  }
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        className={className}
+        aria-pressed={Boolean(active)}
+        onMouseMove={tiltCard}
+        onMouseLeave={untiltCard}
+        onClick={(event) => {
+          pulseCard(event);
+          onClick(event);
+        }}
+      >
+        {body}
+      </button>
+    );
+  }
   return (
-    <button type="button" className="rm-kpi-btn" onClick={onClick}>
-      {card}
-    </button>
+    <div className={className} onMouseMove={tiltCard} onMouseLeave={untiltCard}>
+      {body}
+    </div>
   );
 }
 

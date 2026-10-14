@@ -1,6 +1,8 @@
 import dotenv from 'dotenv'
 import { createApp } from './app.js'
 import { waitForDatabase } from './db/index.js'
+import { ensureAppColumns } from './db/ensure.js'
+import { alignUserRoles } from './db/seed.js'
 
 dotenv.config()
 
@@ -11,7 +13,9 @@ const publicApp = (process.env.PUBLIC_APP_URL || process.env.FRONTEND_URL || '')
 
 try {
   await waitForDatabase()
-  console.log('Database ready')
+  await ensureAppColumns()
+  await alignUserRoles()
+  console.log('Database and Route Master tables ready')
 } catch (e) {
   console.error('Database connection failed:', e instanceof Error ? e.message : e)
   process.exit(1)

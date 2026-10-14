@@ -12,5 +12,8 @@
   --color-sidebar: #10263a;
 }
 
-html, body, #root { height: 100%; }
+html, body, #root { height: 100%; background: #ffffff !important; }
+.wrapper, .content-wrapper, .content, .main-sidebar, .main-header {
+  background-color: #ffffff !important;
+}
 button { cursor: pointer; }

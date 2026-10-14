@@ -6,6 +6,7 @@ import "./index.css";
 import "./styles/refex.css";
 import "./styles/fleet-saas.css";
 import "./styles/sales.css";
+import "./styles/toll-fx.css";
 import "./components/login/login-suite.css";
 
 ReactDOM.createRoot(document.getElementById("root")).render(

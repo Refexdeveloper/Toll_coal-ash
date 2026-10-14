@@ -2,6 +2,7 @@ import bcrypt from 'bcryptjs'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { applyRoleTemplates } from '../services/roles.js'
 import { all, get, now, run, withTransaction } from './index.js'
 import type { PoolConnection, ResultSetHeader } from 'mysql2/promise'
 
@@ -35,29 +36,7 @@ const LOGIN_USERS: SeedUser[] = [
     jobtitle: 'Administrator',
     region_key: null,
     employee_num: 'E0001',
-    permissions: { superuser: '1', admin: '1' },
-  },
-  {
-    first_name: 'Prem Kumar',
-    last_name: 'Thakur',
-    username: 'prem.thakur',
-    email: 'prem.thakur@3imedical.com',
-    password: 'Sales@3i',
-    jobtitle: 'Sales Manager · North',
-    region_key: 'north',
-    employee_num: 'E0002',
-    permissions: { sales: '1', 'opportunities.view': '1', 'opportunities.edit': '1' },
-  },
-  {
-    first_name: 'West',
-    last_name: 'Sales',
-    username: 'west.sales',
-    email: 'west.sales@3imedical.com',
-    password: 'Sales@3i',
-    jobtitle: 'West Sales Team',
-    region_key: 'west',
-    employee_num: 'E0003',
-    permissions: { sales: '1', 'opportunities.view': '1', 'opportunities.edit': '1' },
+    permissions: { superuser: '1', admin: '1', fastag: '1', routes: '1', gps: '1', checks: '1', users: '1', activity: '1' },
   },
   {
     first_name: 'Dickson',
@@ -65,10 +44,10 @@ const LOGIN_USERS: SeedUser[] = [
     username: 'dickson.g',
     email: 'dickson.g@refex.co.in',
     password: 'Welcome@2026',
-    jobtitle: 'FASTag',
+    jobtitle: 'Administrator',
     region_key: null,
     employee_num: 'E0004',
-    permissions: { fastag: '1' },
+    permissions: { superuser: '1', admin: '1', fastag: '1', routes: '1', gps: '1', checks: '1', users: '1', activity: '1' },
   },
   {
     first_name: 'Rajlaxmi',
@@ -76,12 +55,22 @@ const LOGIN_USERS: SeedUser[] = [
     username: 'rajlaxmi.s',
     email: 'rajlaxmi.s@refex.co.in',
     password: 'Welcome@2026',
-    jobtitle: 'FASTag',
+    jobtitle: 'GPS Team',
     region_key: null,
     employee_num: 'E0005',
-    permissions: { fastag: '1' },
+    permissions: { fastag: '1', routes: '1', gps: '0', checks: '1' },
   },
 ]
+
+export async function alignUserRoles() {
+  const ts = now()
+  await run(
+    `UPDATE users SET deleted_at = ?, activated = 0, updated_at = ?
+     WHERE deleted_at IS NULL AND email IN (?, ?)`,
+    [ts, ts, 'prem.thakur@3imedical.com', 'west.sales@3imedical.com'],
+  )
+  await applyRoleTemplates()
+}
 
 export async function ensureLoginUsers() {
   const ts = now()
@@ -109,6 +98,7 @@ export async function ensureLoginUsers() {
       console.log(`Created login user: ${u.email}`)
     }
   }
+  await alignUserRoles()
 }
 
 type SeedOpp = {
@@ -231,8 +221,8 @@ export async function seed() {
   await ensureLoginUsers()
   await seedOpportunities(false)
   console.log('Login: raghul.je@refex.co.in / RefexAdmin@')
-  console.log('Login: prem.thakur@3imedical.com / Sales@3i')
-  console.log('Login: west.sales@3imedical.com / Sales@3i')
+  console.log('Login: dickson.g@refex.co.in / Welcome@2026')
+  console.log('Login: rajlaxmi.s@refex.co.in / Welcome@2026')
 }
 
 const isDirect = process.argv[1]?.includes('seed')

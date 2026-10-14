@@ -42,7 +42,7 @@ export default function Dashboard({ region }) {
 
       <div className="row">
         <div className="col-md-7">
-          <Box title="Sales funnel" type="primary" tools={<span className="text-muted">Click a stage</span>}>
+          <Box title="Sales funnel" type="primary">
             <FunnelBars
               onSelect={(item) => nav(item.nav || "/funnel")}
               items={[

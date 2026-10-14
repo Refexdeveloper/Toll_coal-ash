@@ -72,13 +72,6 @@ export default function Pipeline({ region }) {
         <Kpi label="Owner filter" value={ownerLabel} hint="Drag cards between columns" icon="fa-user" tone="slate" />
       </div>
 
-      <div className="sf-pipe-banner">
-        <i className="fas fa-arrows-alt" aria-hidden="true" />
-        <span>Drag cards between columns to update stage</span>
-        <span className="sf-pipe-banner__sep">·</span>
-        <span>Click a card to open full details</span>
-      </div>
-
       <div className="sf-board">
         {COLS.map((c) => {
           const list = c.id === "booked" ? bookedRows : openRows.filter((o) => o.stage === c.id);
