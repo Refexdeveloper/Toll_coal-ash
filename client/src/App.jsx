@@ -42,17 +42,6 @@ function RequireAuth({ children }) {
   return children;
 }
 
-function RequirePasswordReady({ children }) {
-  const { user, loading } = useAuth();
-  const location = useLocation();
-  if (loading) return <p className="p-10 text-center text-slate-500">Loading…</p>;
-  if (user?.must_change_password && location.pathname !== "/account/password") {
-    const next = encodeURIComponent(`${location.pathname}${location.search}`);
-    return <Navigate to={`/account/password?next=${next}`} replace />;
-  }
-  return children;
-}
-
 function RequireModule({ permission, children }) {
   const { can, loading } = useAuth();
   if (loading) return <p className="p-10 text-center text-slate-500">Loading…</p>;
@@ -74,11 +63,8 @@ function LoginRoute() {
   return (
     <InteractiveLoginPage
       onSubmit={async ({ email, password }) => {
-        const u = await login(email, password);
-        const dest = u?.must_change_password
-          ? `/account/password${next ? `?next=${encodeURIComponent(next)}` : ""}`
-          : (next || "/routes");
-        window.location.replace(dest);
+        await login(email, password);
+        window.location.replace(next || "/routes");
       }}
     />
   );
@@ -99,9 +85,7 @@ function AppRoutes() {
       <Route
         element={
           <RequireAuth>
-            <RequirePasswordReady>
-              <Shell region={region} setRegion={setRegion} onSearch={setSearch} />
-            </RequirePasswordReady>
+            <Shell region={region} setRegion={setRegion} onSearch={setSearch} />
           </RequireAuth>
         }
       >

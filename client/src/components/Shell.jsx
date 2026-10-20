@@ -100,15 +100,6 @@ export default function Shell({ region, setRegion, onSearch }) {
           <img src="/logo.png" alt="Refex One" style={{ height: 36, width: "auto", maxWidth: 175, objectFit: "contain" }} />
         </NavLink>
         <nav className="navbar">
-          <button
-            type="button"
-            className="sidebar-toggle"
-            onClick={() => setCollapsed((c) => !c)}
-            aria-label={drawerOpen ? "Close menu" : "Open menu"}
-            aria-expanded={drawerOpen}
-          >
-            <i className="fas fa-bars" />
-          </button>
           {/* <form className="header-search" onSubmit={searchSubmit}>
             <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search opportunities, customers…" />
             <button type="submit"><i className="fas fa-search" /></button>
@@ -170,6 +161,17 @@ export default function Shell({ region, setRegion, onSearch }) {
 
       <div className="content-wrapper toll-stage">
         <section className="tfx-hero">
+          <button
+            type="button"
+            className="sidebar-toggle"
+            onClick={() => setCollapsed((c) => !c)}
+            aria-label={drawerOpen ? "Close menu" : "Open menu"}
+            aria-expanded={drawerOpen}
+          >
+            <svg className={`sidebar-toggle-icon${collapsed ? "" : " is-open"}`} viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M8.5 5.5v13l9-6.5-9-6.5z" fill="currentColor" />
+            </svg>
+          </button>
           <div className="tfx-bubbles" aria-hidden="true">
             <i /><i /><i /><i /><i /><i /><i />
           </div>
