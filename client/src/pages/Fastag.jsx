@@ -20,6 +20,25 @@ function entryStamp(row) {
   return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
 }
 
+function compareReads(a, b, sortKey, sortDir) {
+  const dir = sortDir === "asc" ? 1 : -1;
+  if (sortKey === "challan") {
+    const left = String(a.challan_id || "").trim();
+    const right = String(b.challan_id || "").trim();
+    if (!left && right) return 1;
+    if (left && !right) return -1;
+    const byChallan = left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" });
+    if (byChallan) return byChallan * dir;
+  }
+  const leftTime = entryStamp(a);
+  const rightTime = entryStamp(b);
+  const leftMissing = leftTime === Number.NEGATIVE_INFINITY;
+  const rightMissing = rightTime === Number.NEGATIVE_INFINITY;
+  if (leftMissing && !rightMissing) return 1;
+  if (!leftMissing && rightMissing) return -1;
+  return (leftTime - rightTime) * dir || Number(b.id) - Number(a.id);
+}
+
 function clockBound(time, end) {
   const parts = String(time || "").split(":");
   const hour = parts[0] || "00";
@@ -66,6 +85,8 @@ export default function Fastag() {
   const toast = useToast();
   const { can, isAdmin } = useAuth();
   const [batches, setBatches] = useState([]);
+  const [sheetIds, setSheetIds] = useState([]);
+  const [combined, setCombined] = useState(null);
   const [detail, setDetail] = useState(null);
   const [activity, setActivity] = useState([]);
   const [plate, setPlate] = useState("");
@@ -91,8 +112,11 @@ export default function Fastag() {
   const [preview, setPreview] = useState(null);
   const [filter, setFilter] = useState("");
   const [projectFilter, setProjectFilter] = useState("");
-  const [headingFilter, setHeadingFilter] = useState("");
+  const [showAllCaptured, setShowAllCaptured] = useState(false);
+  const [showFetched, setShowFetched] = useState(false);
+  const [tollQuery, setTollQuery] = useState("");
   const [page, setPage] = useState(1);
+  const [vehiclePage, setVehiclePage] = useState(1);
   const [selectedRead, setSelectedRead] = useState(null);
   const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [activityTotal, setActivityTotal] = useState(0);
@@ -102,6 +126,12 @@ export default function Fastag() {
   const recordsRef = useRef(null);
   const vehiclesRef = useRef(null);
   const searchGen = useRef(0);
+  const sheetGen = useRef(0);
+  const [sortKey, setSortKey] = useState("time");
+  const [sortDir, setSortDir] = useState("desc");
+  const [sheetFrom, setSheetFrom] = useState("");
+  const [sheetTo, setSheetTo] = useState("");
+  const [sheetQuery, setSheetQuery] = useState("");
   const [dateFrom, setDateFrom] = useState("");
   const [timeFrom, setTimeFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
@@ -130,9 +160,80 @@ export default function Fastag() {
     return data;
   }
 
+  function sheetTitle(row) {
+    if (!row) return "Sheet";
+    return row.source === "manual" ? `Search · ${row.filename}` : row.filename;
+  }
+
+  function titleForBatch(id) {
+    return sheetTitle(batches.find((row) => Number(row.id) === Number(id)));
+  }
+
+  function stampDay(value) {
+    const match = String(value || "").match(/\d{4}-\d{2}-\d{2}/);
+    return match ? match[0] : "";
+  }
+
+  function onSheetDates(value) {
+    const day = stampDay(value);
+    if (!day) return false;
+    if (sheetFrom && day < sheetFrom) return false;
+    if (sheetTo && day > sheetTo) return false;
+    return true;
+  }
+
+  function batchVisible(row) {
+    const q = sheetQuery.trim().toLowerCase();
+    if (q && !`${row.filename} ${sheetTitle(row)}`.toLowerCase().includes(q)) return false;
+    if ((sheetFrom || sheetTo) && ![row.created_at, row.started_at, row.finished_at].some(onSheetDates)) return false;
+    return true;
+  }
+
+  async function chooseSheets(ids) {
+    const next = [...new Set(ids.map((id) => Number(id)).filter((id) => id > 0))];
+    setSheetIds(next);
+    setStoredRows(null);
+    setSelectedIds(new Set());
+    setPage(1);
+    setVehiclePage(1);
+    setPicked(null);
+    const gen = sheetGen.current + 1;
+    sheetGen.current = gen;
+    if (!next.length) {
+      setCombined(null);
+      return;
+    }
+    if (next.length === 1) {
+      setCombined(null);
+      await openBatch(next[0]);
+      return;
+    }
+    setCombined((current) => {
+      if (!current) return current;
+      const chosen = new Set(next);
+      return {
+        batches: (current.batches || []).filter((row) => chosen.has(Number(row.id))),
+        vehicles: (current.vehicles || []).filter((row) => chosen.has(Number(row.batch_id))),
+        reads: (current.reads || []).filter((row) => chosen.has(Number(row.batch_id))),
+      };
+    });
+    setBusy("sheets");
+    try {
+      const data = await api.fastagCombined(next);
+      if (sheetGen.current !== gen) return;
+      setCombined(data);
+      const focus = next.includes(Number(detail?.batch?.id)) ? detail.batch.id : next[0];
+      await openBatch(focus);
+    } catch (error) {
+      if (sheetGen.current === gen) toast.error(error.message);
+    } finally {
+      if (sheetGen.current === gen) setBusy((current) => (current === "sheets" ? "" : current));
+    }
+  }
+
   useEffect(() => {
     loadList()
-      .then((rows) => { if (rows[0]) return openBatch(rows[0].id); })
+      .then((rows) => { if (rows[0]) { setSheetIds([rows[0].id]); return openBatch(rows[0].id); } })
       .catch((error) => { setLoadState("error"); toast.error(error.message); })
       .finally(() => setLoadState("ready"));
     if (can("activity")) loadActivity().catch((error) => toast.error(error.message));
@@ -140,6 +241,7 @@ export default function Fastag() {
   }, []);
 
   const batch = detail?.batch;
+  const many = sheetIds.length > 1 && combined;
   const running = batch?.status === "running" || busy === "fetch";
 
   useEffect(() => {
@@ -149,13 +251,16 @@ export default function Fastag() {
         .then((data) => {
           if (data.batch.status !== "running") {
             if (can("activity")) loadActivity().catch(() => undefined);
-            return loadList();
+            loadList();
+            if (sheetIds.length > 1) {
+              api.fastagCombined(sheetIds).then((combinedData) => setCombined(combinedData)).catch(() => undefined);
+            }
           }
         })
         .catch((error) => toast.error(error.message));
     }, 1500);
     return () => window.clearInterval(timer);
-  }, [batch?.id, batch?.status]);
+  }, [batch?.id, batch?.status, sheetIds]);
 
   async function previewSheet(event) {
     event.preventDefault();
@@ -190,6 +295,9 @@ export default function Fastag() {
       const data = await api.fastagUpload(file);
       const rejected = data.rejected || [];
       setDetail(data);
+      sheetGen.current += 1;
+      setCombined(null);
+      setSheetIds(data.batch?.id ? [data.batch.id] : []);
       setUploadErrors(rejected.map((item) => item.message));
       setPreview(null);
       setFile(null);
@@ -342,6 +450,9 @@ export default function Fastag() {
         toDate: fetchTo,
       });
       setDetail(data);
+      sheetGen.current += 1;
+      setCombined(null);
+      setSheetIds(data.batch?.id ? [data.batch.id] : []);
       await loadList();
       if (fetchFrom || fetchTo) {
         setDateFrom(fetchFrom);
@@ -363,8 +474,16 @@ export default function Fastag() {
 
   const typedPlate = plate.toUpperCase().replace(/[^A-Z0-9]/g, "");
   const query = filter.trim().toUpperCase();
-  const vehicles = detail?.vehicles || [];
-  const reads = detail?.reads || [];
+  const shownBatches = batches.filter(batchVisible);
+  const shownBatchIds = new Set(shownBatches.map((row) => Number(row.id)));
+  const sheetListFiltered = Boolean(sheetFrom || sheetTo || sheetQuery.trim());
+  const pickedSheetIds = sheetIds.map((id) => Number(id)).filter((id) => shownBatchIds.has(id));
+  const allShownPicked = shownBatches.length > 0 && shownBatches.every((row) => pickedSheetIds.includes(Number(row.id)));
+  const uploadedIds = pickedSheetIds.filter((id) => shownBatches.some((row) => Number(row.id) === id && row.source !== "manual"));
+  const loadedVehicles = many ? (combined.vehicles || []) : (detail?.vehicles || []);
+  const loadedReads = many ? (combined.reads || []) : (detail?.reads || []);
+  const vehicles = loadedVehicles.filter((row) => !sheetListFiltered || shownBatchIds.has(Number(row.batch_id)));
+  const reads = loadedReads.filter((row) => !sheetListFiltered || shownBatchIds.has(Number(row.batch_id)));
   const dateActive = Boolean(dateFrom || dateTo);
   function inDateRange(row) {
     const day = readDay(row);
@@ -389,8 +508,8 @@ export default function Fastag() {
   }, [reads, dateFrom, timeFrom, dateTo, timeTo, dateActive]);
   const shownVehicles = useMemo(
     () => vehicles.filter((row) => {
-      if (typedPlate.length >= 4 && !row.vehicle_reg_no.replace(/[^A-Z0-9]/g, "").includes(typedPlate)) return false;
-      if (platesInRange && !platesInRange.has(row.vehicle_reg_no)) return false;
+      if (!pickedSheetIds.length && typedPlate.length >= 4 && !row.vehicle_reg_no.replace(/[^A-Z0-9]/g, "").includes(typedPlate)) return false;
+      if (!pickedSheetIds.length && platesInRange && !platesInRange.has(row.vehicle_reg_no)) return false;
       if (projectFilter && (row.project_name || "") !== projectFilter) return false;
       if (!query) return true;
       return [row.vehicle_reg_no, row.project_name, row.challan_id, row.trip_id, row.from_location, row.to_location, row.error_message]
@@ -398,30 +517,111 @@ export default function Fastag() {
         .toUpperCase()
         .includes(query);
     }),
-    [vehicles, typedPlate, platesInRange, projectFilter, query],
+    [vehicles, pickedSheetIds, typedPlate, platesInRange, projectFilter, query],
   );
+  const vehiclePageSize = 25;
+  const vehiclePageCount = Math.max(1, Math.ceil(shownVehicles.length / vehiclePageSize));
+  const safeVehiclePage = Math.min(vehiclePage, vehiclePageCount);
+  const vehicleRows = shownVehicles.slice((safeVehiclePage - 1) * vehiclePageSize, safeVehiclePage * vehiclePageSize);
   const projectOptions = useMemo(
     () => [...new Set([...vehicles, ...reads, ...(storedRows || [])].map((row) => row.project_name).filter(Boolean))].sort(),
     [vehicles, reads, storedRows],
   );
+  const sourceReads = pickedSheetIds.length ? reads : (storedRows || reads);
+  const seeAllCaptured = showFetched || (isAdmin && showAllCaptured);
+  const hiddenRouteCount = sourceReads.filter((row) => row.route_match && !["qualifying", "unverified", "ambiguous"].includes(row.route_match)).length;
   const shownReads = useMemo(
-    () => (storedRows || reads).filter((row) => {
+    () => sourceReads.filter((row) => {
+      if (!seeAllCaptured && row.route_match && !["qualifying", "unverified", "ambiguous"].includes(row.route_match)) return false;
+      if (tollQuery.trim() && !(row.toll_plaza_name || "").toLowerCase().includes(tollQuery.trim().toLowerCase())) return false;
       if (!inDateRange(row)) return false;
       if (projectFilter && (row.project_name || "") !== projectFilter) return false;
-      if (headingFilter && (row.heading_code || "unknown") !== headingFilter) return false;
       if (!query) return true;
       return [row.vehicle_reg_no, row.project_name, row.challan_id, row.trip_id, row.toll_plaza_name, row.toll_plaza_geocode]
         .join(" ")
         .toUpperCase()
         .includes(query);
-    }).sort((a, b) => entryStamp(b) - entryStamp(a) || Number(b.id) - Number(a.id)),
-    [reads, storedRows, dateFrom, timeFrom, dateTo, timeTo, projectFilter, headingFilter, query],
+    }).sort((a, b) => compareReads(a, b, sortKey, sortDir)),
+    [sourceReads, seeAllCaptured, tollQuery, dateFrom, timeFrom, dateTo, timeTo, projectFilter, query, sortKey, sortDir],
   );
   const tableReads = shownReads;
   const pageSize = 15;
   const pageCount = Math.max(1, Math.ceil(tableReads.length / pageSize));
   const safePage = Math.min(page, pageCount);
   const pageRows = tableReads.slice((safePage - 1) * pageSize, safePage * pageSize);
+
+  function toggleShownSheets() {
+    const ids = shownBatches.map((row) => Number(row.id));
+    const next = allShownPicked
+      ? sheetIds.filter((id) => !ids.includes(Number(id)))
+      : [...new Set([...sheetIds.map((id) => Number(id)), ...ids])];
+    chooseSheets(next).catch((error) => toast.error(error.message));
+  }
+
+  async function downloadUploaded(ids) {
+    const files = ids.map((id) => Number(id)).filter((id) => id > 0);
+    if (!files.length) {
+      toast.error("Select an uploaded Excel");
+      return;
+    }
+    setBusy("file");
+    try {
+      const downloaded = files.length === 1
+        ? await api.fastagUploadedFile(files[0])
+        : await api.fastagUploadedFiles(files);
+      toast.success(`Downloaded ${downloaded.filename}`);
+    } catch (error) {
+      toast.error(error.message);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  function selectAllExcels() {
+    const excel = shownBatches.filter((row) => row.source !== "manual");
+    const rows = excel.length ? excel : shownBatches;
+    if (!rows.length) {
+      toast.error("No Excel uploads yet");
+      return;
+    }
+    chooseSheets(rows.map((row) => row.id)).catch((error) => toast.error(error.message));
+  }
+
+  async function downloadSelected() {
+    const ids = pickedSheetIds;
+    if (!ids.length) {
+      toast.error(sheetFrom || sheetTo || sheetQuery.trim() ? "No selected file matches this date or search" : "Select at least one Excel or search");
+      return;
+    }
+    if (dateFrom && dateTo && dateFrom > dateTo) {
+      toast.error("The from date must be on or before the to date");
+      return;
+    }
+    setBusy("export");
+    try {
+      const params = new URLSearchParams();
+      if (filter.trim()) params.set("q", filter.trim());
+      else if (typedPlate.length >= 4) params.set("q", plate.trim());
+      if (projectFilter) params.set("project", projectFilter);
+      if (dateFrom) params.set("from", dateFrom);
+      if (dateFrom && timeFrom) params.set("fromTime", timeFrom);
+      if (dateTo) params.set("to", dateTo);
+      if (dateTo && timeTo) params.set("toTime", timeTo);
+      if (tollQuery.trim()) params.set("plaza", tollQuery.trim());
+      if (seeAllCaptured) params.set("allCaptured", "1");
+      const query = params.toString();
+      const exported = ids.length === 1
+        ? await api.fastagExport(ids[0], query)
+        : await api.fastagCombinedExport(ids, query);
+      toast.success(sheetFrom || sheetTo
+        ? `Exported ${ids.length} sheet${ids.length === 1 ? "" : "s"} updated in the selected dates in ${exported.filename}`
+        : `Exported ${ids.length} sheet${ids.length === 1 ? "" : "s"} in ${exported.filename}`);
+    } catch (error) {
+      toast.error(error.message);
+    } finally {
+      setBusy("");
+    }
+  }
   const mapPoints = useMemo(() => {
     const groups = new Map();
     for (const row of tableReads) {
@@ -468,7 +668,11 @@ export default function Fastag() {
     setDateTo("");
     setTimeTo("");
     setProjectFilter("");
-    setHeadingFilter("");
+    setSheetFrom("");
+    setSheetTo("");
+    setSheetQuery("");
+    setTollQuery("");
+    setShowFetched(false);
     setStoredRows(null);
     setPicked(null);
     setPage(1);
@@ -728,78 +932,138 @@ export default function Fastag() {
 
       <div ref={vehiclesRef}>
       <Box
-        title={batch ? batch.filename : "Toll responses"}
-        tools={batch ? (
+        title="Toll responses"
+        tools={(
           <div className="ft-tools">
-            <span className={statusLabel(batch.status).cls}>{statusLabel(batch.status).text}</span>
-            <button type="button" className="btn btn-theme btn-sm" onClick={runSearch}>Search</button>
-            <button type="button" className="btn btn-theme btn-sm" disabled={running || busy === "lookup"} onClick={fetchBatch}>
-              {running ? "Fetching…" : "Fetch toll data"}
+            {batch ? <span className={statusLabel(batch.status).cls}>{statusLabel(batch.status).text}</span> : null}
+            <button type="button" className="btn btn-default btn-sm" onClick={selectAllExcels}>Select all excels</button>
+            <button type="button" className="btn btn-theme btn-sm" disabled={!pickedSheetIds.length || busy === "export"} onClick={downloadSelected}>
+              {busy === "export" ? "Downloading…" : "Download tolls"}
             </button>
+            <button type="button" className="btn btn-default btn-sm" title="Download the Excel files that were uploaded" disabled={!uploadedIds.length || busy === "file"} onClick={() => downloadUploaded(uploadedIds)}>
+              {busy === "file" ? "Downloading…" : "Download uploaded"}
+            </button>
+            {batch ? (
+              <button type="button" className="btn btn-theme btn-sm" title={sheetIds.length === 1 ? "Fetch toll data for this sheet" : "Select one sheet to fetch toll data"} disabled={running || busy === "lookup" || sheetIds.length !== 1} onClick={fetchBatch}>
+                {running ? "Fetching…" : "Fetch toll data"}
+              </button>
+            ) : null}
             {failedCount > 0 ? (
               <button type="button" className="btn btn-default btn-sm" disabled={running || busy === "retry"} onClick={retryFailed}>
                 {busy === "retry" ? "Re-running…" : `Re-run failed (${failedCount})`}
               </button>
             ) : null}
           </div>
-        ) : null}
+        )}
       >
-        {batch ? (
-          <>
-            <div className="ft-filter-row">
-              <div className="ft-field">
-                <span>Search</span>
-                <input
-                  className="form-control"
-                  value={filter}
-                  onChange={(event) => { setFilter(event.target.value); setPicked(null); setPage(1); }}
-                  onKeyDown={(event) => { if (event.key === "Enter") runSearch(); }}
-                  placeholder="Vehicle, plaza, project, trip"
-                  aria-label="Search stored records"
-                />
-              </div>
-              <div className="ft-field">
-                <span>Sheet</span>
-                <select
-                  className="form-control"
-                  value={batch.id}
-                  onChange={(event) => openBatch(event.target.value).catch((error) => toast.error(error.message))}
-                >
-                  {batches.map((row) => (
-                    <option key={row.id} value={row.id}>
-                      {row.filename} · {row.vehicle_count} vehicles · {row.created_at}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="ft-field">
-                <span>Project</span>
-                <select className="form-control" value={projectFilter} onChange={(event) => { setProjectFilter(event.target.value); setPicked(null); }}>
-                  <option value="">All projects</option>
-                  {projectOptions.map((name) => <option key={name} value={name}>{name}</option>)}
-                </select>
-              </div>
-              <div className="ft-field ft-field-action">
-                <span className="ft-field-spacer">Clear</span>
-                <button type="button" className="btn btn-default" onClick={clearFilters}>Clear filters</button>
-              </div>
-            </div>
-            {batch.status === "running" ? (
-              <div className="ft-progress" aria-label="Fetch progress">
-                <div style={{ width: `${progress}%` }} />
-                <span>{finished} of {batch.vehicle_count}</span>
-              </div>
-            ) : null}
-            {batch.error_message ? <p className="text-danger">{batch.error_message}</p> : null}
-          </>
+        <div className="ft-filter-row">
+          <div className="ft-field">
+            <span>From date</span>
+            <DateField value={sheetFrom} onChange={(value) => { setSheetFrom(value); setVehiclePage(1); setPage(1); }} placeholder="Updated from" />
+          </div>
+          <div className="ft-field">
+            <span>To date</span>
+            <DateField value={sheetTo} onChange={(value) => { setSheetTo(value); setVehiclePage(1); setPage(1); }} placeholder="Updated to" />
+          </div>
+          <div className="ft-field">
+            <span>Find file</span>
+            <input
+              className="form-control"
+              value={sheetQuery}
+              onChange={(event) => { setSheetQuery(event.target.value); setVehiclePage(1); setPage(1); }}
+              placeholder="Excel name or vehicle number"
+              aria-label="Find an Excel file or vehicle search"
+            />
+          </div>
+          <div className="ft-field">
+            <span>Project</span>
+            <select className="form-control" value={projectFilter} onChange={(event) => { setProjectFilter(event.target.value); setPicked(null); setVehiclePage(1); }}>
+              <option value="">All projects</option>
+              {projectOptions.map((name) => <option key={name} value={name}>{name}</option>)}
+            </select>
+          </div>
+          <div className="ft-field ft-field-action">
+            <span className="ft-field-spacer">Clear</span>
+            <button type="button" className="btn btn-default" onClick={() => { clearFilters(); setVehiclePage(1); }}>Clear filters</button>
+          </div>
+        </div>
+        <p className="text-muted" style={{ margin: "0 0 8px" }}>
+          {pickedSheetIds.length ? `${pickedSheetIds.length} selected for export.` : "Tick files, or use the heading checkbox to select every row shown."} {shownBatches.length} of {batches.length} shown.
+        </p>
+        <div className="table-responsive ft-sheet-list">
+          <table className="table table-striped">
+            <thead>
+              <tr>
+                <th className="pick-col">
+                  <input
+                    type="checkbox"
+                    aria-label="Select all shown files for export"
+                    checked={allShownPicked}
+                    disabled={!shownBatches.length}
+                    onChange={toggleShownSheets}
+                  />
+                </th>
+                <th>S.No</th>
+                <th>File</th>
+                <th>Type</th>
+                <th>Vehicles</th>
+                <th>Tolls</th>
+                <th>Updated</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {shownBatches.map((row, index) => (
+                <tr key={row.id}>
+                  <td className="pick-col">
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${row.filename}`}
+                      checked={pickedSheetIds.includes(Number(row.id))}
+                      onChange={() => {
+                        const selected = pickedSheetIds.includes(Number(row.id));
+                        const next = selected
+                          ? sheetIds.filter((id) => Number(id) !== Number(row.id))
+                          : [...sheetIds, row.id];
+                        chooseSheets(next).catch((error) => toast.error(error.message));
+                      }}
+                    />
+                  </td>
+                  <td>{index + 1}</td>
+                  <td>{row.filename}</td>
+                  <td>{row.source === "manual" ? "Search" : "Excel"}</td>
+                  <td>{row.vehicle_count}</td>
+                  <td>{row.read_count}</td>
+                  <td>{String(row.finished_at || row.created_at || "").replace("T", " ") || "—"}</td>
+                  <td>
+                    {row.source === "manual" ? "—" : (
+                      <button type="button" className="btn btn-default btn-sm" disabled={busy === "file"} onClick={() => downloadUploaded([row.id])}>Download</button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+              {!shownBatches.length ? (
+                <tr><td colSpan={8} className="text-muted">{batches.length ? "No Excel or search was updated in this date range." : "No Excel uploads yet."}</td></tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+        {batch?.status === "running" ? (
+          <div className="ft-progress" aria-label="Fetch progress">
+            <div style={{ width: `${progress}%` }} />
+            <span>{finished} of {batch.vehicle_count}</span>
+          </div>
         ) : null}
+        {batch?.error_message ? <p className="text-danger">{batch.error_message}</p> : null}
 
         {batch ? (
+          <>
           <div className="table-responsive ft-table">
             <table className="table table-striped">
               <thead>
                 <tr>
                   <th>Vehicle</th>
+                  {many ? <th>Sheet</th> : null}
                   <th>Project</th>
                   <th>Challan ID</th>
                   <th>From</th>
@@ -808,9 +1072,10 @@ export default function Fastag() {
                 </tr>
               </thead>
               <tbody>
-                {shownVehicles.map((row) => (
+                {vehicleRows.map((row) => (
                     <tr key={row.id}>
                       <td>{row.vehicle_reg_no}</td>
+                      {many ? <td>{titleForBatch(row.batch_id)}</td> : null}
                       <td>{row.project_name || "—"}</td>
                       <td>{row.challan_id || "—"}</td>
                       <td>{row.from_location || "—"}</td>
@@ -818,12 +1083,22 @@ export default function Fastag() {
                       <td>{row.fetched_at || "—"}</td>
                     </tr>
                 ))}
-                {!shownVehicles.length ? (
-                  <tr><td colSpan={6} className="text-muted">No vehicles match this filter.</td></tr>
+                {!vehicleRows.length ? (
+                  <tr><td colSpan={many ? 7 : 6} className="text-muted">No vehicles match this filter.</td></tr>
                 ) : null}
               </tbody>
             </table>
           </div>
+          {shownVehicles.length > vehiclePageSize ? (
+            <div className="ft-pager">
+              <span className="text-muted">Vehicles {safeVehiclePage} of {vehiclePageCount}</span>
+              <div className="ft-actions">
+                <button type="button" className="btn btn-default btn-sm" disabled={safeVehiclePage <= 1} onClick={() => setVehiclePage((current) => Math.max(1, current - 1))}>Previous</button>
+                <button type="button" className="btn btn-default btn-sm" disabled={safeVehiclePage >= vehiclePageCount} onClick={() => setVehiclePage((current) => Math.min(vehiclePageCount, current + 1))}>Next</button>
+              </div>
+            </div>
+          ) : null}
+          </>
         ) : null}
       </Box>
       </div>
@@ -842,14 +1117,41 @@ export default function Fastag() {
           title="Toll crossed"
           tools={(
             <div className="ft-tools">
-              <span className="text-muted">{tableReads.length} shown</span>
-              <button
-                type="button"
-                className="btn btn-theme btn-sm"
-                disabled={!batch || !reads.length || busy === "export" || Boolean(storedRows)}
-                onClick={async () => {
+              <span className="text-muted">{tableReads.length} shown{!seeAllCaptured && hiddenRouteCount ? ` · ${hiddenRouteCount} outside the route direction` : ""}</span>
+              {isAdmin ? (
+                <button
+                  type="button"
+                  className="btn btn-default btn-sm"
+                  onClick={() => { setShowAllCaptured((current) => !current); setPage(1); setPicked(null); }}
+                >
+                  {showAllCaptured ? "Show route crossings" : "Show all captured"}
+                </button>
+              ) : null}
+              <select
+                className="form-control"
+                style={{ width: 190, height: 32 }}
+                aria-label="Export toll crossings"
+                value=""
+                disabled={busy === "export" || !tableReads.length}
+                onChange={async (event) => {
+                  const mode = event.target.value;
+                  event.target.value = "";
+                  if (!mode) return;
+                  if (mode === "selected" && !selectedIds.size) {
+                    toast.error("Select at least one toll row");
+                    return;
+                  }
+                  if (mode === "page" && !pageRows.length) return;
                   setBusy("export");
                   try {
+                    if (mode === "page" || mode === "selected") {
+                      const ids = mode === "page" ? pageRows.map((row) => row.id) : [...selectedIds];
+                      const exported = await api.fastagSelectedExport(ids);
+                      toast.success(mode === "page"
+                        ? `Exported page ${safePage} (${ids.length} rows) in ${exported.filename}`
+                        : `Exported ${ids.length} selected records in ${exported.filename}`);
+                      return;
+                    }
                     const params = new URLSearchParams();
                     if (filter.trim()) params.set("q", filter.trim());
                     else if (typedPlate.length >= 4) params.set("q", plate.trim());
@@ -858,10 +1160,13 @@ export default function Fastag() {
                     if (dateFrom && timeFrom) params.set("fromTime", timeFrom);
                     if (dateTo) params.set("to", dateTo);
                     if (dateTo && timeTo) params.set("toTime", timeTo);
-                    if (headingFilter) params.set("heading", headingFilter);
+                    if (tollQuery.trim()) params.set("plaza", tollQuery.trim());
+                    if (seeAllCaptured) params.set("allCaptured", "1");
                     const query = params.toString();
-                    const exported = await api.fastagExport(batch.id, query);
-                    toast.success(query ? `Exported filtered rows in ${exported.filename}` : `Exported all rows in ${exported.filename}`);
+                    const exported = many
+                      ? await api.fastagCombinedExport(sheetIds, query)
+                      : await api.fastagExport(batch.id, query);
+                    toast.success(`Exported all ${tableReads.length} shown rows in ${exported.filename}`);
                   } catch (error) {
                     toast.error(error.message);
                   } finally {
@@ -869,39 +1174,15 @@ export default function Fastag() {
                   }
                 }}
               >
-                {busy === "export" ? "Exporting…" : (filter.trim() || typedPlate.length >= 4 || projectFilter || dateFrom || timeFrom || dateTo || timeTo || headingFilter) ? "Export filtered" : "Export all"}
-              </button>
-              <button
-                type="button"
-                className="btn btn-default btn-sm"
-                disabled={!selectedIds.size || busy === "export"}
-                onClick={async () => {
-                  setBusy("export");
-                  try {
-                    const exported = await api.fastagSelectedExport([...selectedIds]);
-                    toast.success(`Exported ${selectedIds.size} selected records in ${exported.filename}`);
-                  } catch (error) {
-                    toast.error(error.message);
-                  } finally {
-                    setBusy("");
-                  }
-                }}
-              >
-                {selectedIds.size ? `Export selected (${selectedIds.size})` : "Export selected"}
-              </button>
+                <option value="">{busy === "export" ? "Exporting…" : "Export"}</option>
+                <option value="page">Export this page</option>
+                <option value="all">Export all</option>
+                <option value="selected">{selectedIds.size ? `Export selected (${selectedIds.size})` : "Export selected"}</option>
+              </select>
             </div>
           )}
         >
           <div className="ft-filter-row">
-            <div className="ft-field">
-              <span>Heading Towards</span>
-              <select className="form-control" value={headingFilter} aria-label="Heading Towards" onChange={(event) => { setHeadingFilter(event.target.value); setPicked(null); setPage(1); }}>
-                <option value="">All</option>
-                <option value="loading">Towards Loading Point</option>
-                <option value="unloading">Towards Unloading Point</option>
-                <option value="unknown">Unknown / Unverified</option>
-              </select>
-            </div>
             <div className="ft-field">
               <span>From date</span>
               <DateField value={dateFrom} onChange={(value) => { setDateFrom(value); setPicked(null); setPage(1); }} placeholder="Entry from" />
@@ -918,9 +1199,20 @@ export default function Fastag() {
               <span>To time</span>
               <input className="form-control" type="time" step="1" value={timeTo} aria-label="To time" onChange={(event) => { setTimeTo(event.target.value); setPicked(null); setPage(1); }} />
             </div>
+            <div className="ft-field">
+              <span>Toll</span>
+              <input className="form-control" value={tollQuery} placeholder="Toll plaza name" aria-label="Filter by toll plaza" onChange={(event) => { setTollQuery(event.target.value); setPicked(null); setPage(1); }} />
+            </div>
+            <div className="ft-field ft-field-action">
+              <span className="ft-field-spacer">Fetched</span>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, height: 42, margin: 0, fontWeight: 700, color: "#0f172a" }}>
+                <input type="checkbox" checked={showFetched} onChange={(event) => { setShowFetched(event.target.checked); setPage(1); setPicked(null); }} />
+                Show fetched tolls
+              </label>
+            </div>
             <div className="ft-field ft-field-action">
               <span className="ft-field-spacer">Clear</span>
-              <button type="button" className="btn btn-default" onClick={() => { setDateFrom(""); setTimeFrom(""); setDateTo(""); setTimeTo(""); setPicked(null); setPage(1); }}>Clear dates</button>
+              <button type="button" className="btn btn-default" onClick={() => { setDateFrom(""); setTimeFrom(""); setDateTo(""); setTimeTo(""); setTollQuery(""); setPicked(null); setPage(1); }}>Clear dates</button>
             </div>
           </div>
           <div className="table-responsive">
@@ -936,11 +1228,19 @@ export default function Fastag() {
                     />
                   </th>
                   <th>Vehicle</th>
+                  {many ? <th>Sheet</th> : null}
                   <th>Project</th>
-                  <th>Challan ID</th>
-                  <th>Toll entry time</th>
+                  <th>
+                    <button type="button" className="ft-sort" aria-label={`Sort by challan ID, ${sortKey === "challan" && sortDir === "asc" ? "descending" : "ascending"}`} onClick={() => { setPage(1); if (sortKey === "challan") setSortDir((current) => current === "asc" ? "desc" : "asc"); else { setSortKey("challan"); setSortDir("asc"); } }}>
+                      Challan ID{sortKey === "challan" ? (sortDir === "asc" ? " ↑" : " ↓") : ""}
+                    </button>
+                  </th>
+                  <th>
+                    <button type="button" className="ft-sort" aria-label={`Sort by toll entry time, ${sortKey === "time" && sortDir === "desc" ? "oldest first" : "newest first"}`} onClick={() => { setPage(1); if (sortKey === "time") setSortDir((current) => current === "asc" ? "desc" : "asc"); else { setSortKey("time"); setSortDir("desc"); } }}>
+                      Toll entry time{sortKey === "time" ? (sortDir === "asc" ? " ↑" : " ↓") : ""}
+                    </button>
+                  </th>
                   {isAdmin ? <th>Direction</th> : null}
-                  <th>Heading Towards</th>
                   <th>Toll plaza</th>
                   <th>Geocode</th>
                   <th>Fetched at</th>
@@ -961,11 +1261,11 @@ export default function Fastag() {
                         />
                       </td>
                       <td>{row.vehicle_reg_no}</td>
+                      {many ? <td>{titleForBatch(row.batch_id)}</td> : null}
                       <td>{row.project_name || "—"}</td>
                       <td>{row.challan_id || "—"}</td>
                       <td>{row.reader_read_time || "—"}</td>
                       {isAdmin ? <td>{row.lane_direction || "—"}</td> : null}
-                      <td>{row.heading_towards || "Unknown / Unverified"}</td>
                       <td>{row.toll_plaza_name || "—"}</td>
                       <td>
                         {geo ? (
@@ -991,7 +1291,7 @@ export default function Fastag() {
                   );
                 })}
                 {!pageRows.length ? (
-                  <tr><td colSpan={isAdmin ? 11 : 10} className="text-muted">{tableReads.length || reads.length || storedRows ? "No toll reads match these filters." : "No stored toll reads."}</td></tr>
+                  <tr><td colSpan={(isAdmin ? 10 : 9) + (many ? 1 : 0)} className="text-muted">{hiddenRouteCount && !tableReads.length && !showFetched ? "No crossings follow the route. Turn on Show fetched tolls to see the stored tolls." : tableReads.length || reads.length || storedRows ? "No toll reads match these filters." : "No stored toll reads."}</td></tr>
                 ) : null}
               </tbody>
             </table>
@@ -1049,7 +1349,7 @@ export default function Fastag() {
           <p><strong>Challan ID</strong> {selectedRead.challan_id || "—"}</p>
           <p><strong>Toll entry time</strong> {selectedRead.reader_read_time || "—"}</p>
           {isAdmin ? <p><strong>Direction</strong> {selectedRead.lane_direction || "—"}</p> : null}
-          <p><strong>Heading Towards</strong> {selectedRead.heading_towards || "Unknown / Unverified"}</p>
+          {selectedRead.route_note ? <p><strong>Route check</strong> {selectedRead.route_note}</p> : null}
           <p><strong>Type</strong> {selectedRead.vehicle_type || "—"}</p>
           <p><strong>Coordinates</strong> {selectedRead.toll_plaza_geocode || "No coordinates on this record"}</p>
           <p><strong>Fetched at</strong> {selectedRead.fetched_at || selectedRead.created_at || "—"}</p>

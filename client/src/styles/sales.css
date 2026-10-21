@@ -1530,6 +1530,23 @@
   font-weight: 600;
   color: #0f172a;
 }
+.ft-filter-row .ft-sheet-pick { flex-basis: 280px; max-width: 420px; }
+.ft-sheet-menu { width: min(420px, 92vw); }
+.ft-multi-list label span { display: flex; flex-direction: column; min-width: 0; }
+.ft-multi-list label small { font-weight: 600; color: #64748b; }
+.ft-sheet-list {
+  max-height: 320px;
+  margin-bottom: 14px;
+  border: 1px solid #d5dee8;
+  border-radius: 12px;
+  background: #fff;
+}
+.ft-sheet-list thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f8fafc;
+}
 .ft-map-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 280px;
@@ -1651,6 +1668,16 @@
 .ft-plaza.is-picked { border-color: #c2410c; background: #fff7ed; }
 .ft-plaza strong { color: #0f172a; }
 .ft-plaza span, .ft-plaza em { color: #64748b; font-style: normal; font-size: 12px; }
+.ft-sort {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  text-align: left;
+}
 .ft-geo-cell { display: inline-flex; align-items: center; gap: 8px; }
 .ft-geo-link {
   padding: 0;

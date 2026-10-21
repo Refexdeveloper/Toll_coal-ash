@@ -102,6 +102,9 @@ export const api = {
   adminRoles: () => request("/admin/roles"),
   saveAdminRoles: (gps) => request("/admin/roles", { method: "PUT", json: { gps } }),
   runMigrations: () => request("/admin/migrate", { method: "POST" }),
+  gpsCollectionSettings: () => request("/admin/gps-collection"),
+  saveGpsCollectionSettings: (body) => request("/admin/gps-collection", { method: "PUT", json: body }),
+  runGpsCollection: () => request("/admin/gps-collection/run", { method: "POST" }),
   createUser: (body) => request("/users", { method: "POST", json: body }),
   patchUser: (id, body) => request(`/users/${id}`, { method: "PATCH", json: body }),
   deleteUser: (id) => request(`/users/${id}`, { method: "DELETE" }),
@@ -160,6 +163,7 @@ export const api = {
     return request("/fastag/entered?" + params.toString());
   },
   fastagAudit: (vehicle = "") => request("/fastag/audit?vehicle=" + encodeURIComponent(vehicle)),
+  fastagAuditClose: (keys) => request("/fastag/audit/close", { method: "POST", json: { keys } }),
   fastagAuditExport: (vehicle = "", focus = "", keys = []) => {
     if (keys.length) {
       return request("/fastag/audit/export", { method: "POST", json: { vehicle, focus, keys }, download: true });
@@ -171,6 +175,10 @@ export const api = {
     return request("/fastag/audit/export" + (query ? `?${query}` : ""), { download: true });
   },
   fastagExport: (id, query = "") => request("/fastag/batches/" + encodeURIComponent(id) + "/export" + (query ? `?${query}` : ""), { download: true }),
+  fastagCombined: (ids) => request("/fastag/batches/combined", { method: "POST", json: { ids } }),
+  fastagCombinedExport: (ids, query = "") => request("/fastag/batches/export" + (query ? `?${query}` : ""), { method: "POST", json: { ids }, download: true }),
+  fastagUploadedFile: (id) => request("/fastag/batches/" + encodeURIComponent(id) + "/file", { download: true }),
+  fastagUploadedFiles: (ids) => request("/fastag/batches/files", { method: "POST", json: { ids }, download: true }),
   fastagSelectedExport: (ids) => request("/fastag/reads/export", { method: "POST", json: { ids }, download: true }),
   routeExport: (ids) => request("/routes/export", { method: "POST", json: { ids }, download: true }),
   savedTollExport: (names) => request("/routes/directory/saved-tolls/export", { method: "POST", json: { names }, download: true }),
@@ -184,8 +192,28 @@ export const api = {
   downloadRouteTemplate: () => request("/routes/sample-template", { download: true }),
   // GPS Tracking
   gpsLive: (vno, sync = false) => request(`/gps/live?vno=${encodeURIComponent(vno)}${sync ? '&sync=1' : ''}`),
-  gpsHistory: (vno, from = "", to = "", limit = 500) =>
-    request(`/gps/history?vno=${encodeURIComponent(vno)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&limit=${limit}`),
+  gpsHistory: ({ vno = "", from = "", to = "", fromTime = "", toTime = "", limit = 500 } = {}) => {
+    const params = new URLSearchParams();
+    if (vno) params.set("vno", vno);
+    if (from) params.set("from", from);
+    if (to) params.set("to", to);
+    if (fromTime) params.set("fromTime", fromTime);
+    if (toTime) params.set("toTime", toTime);
+    params.set("limit", String(limit));
+    return request(`/gps/history?${params.toString()}`);
+  },
+  gpsCollectionStatus: () => request("/gps/collection-status"),
+  gpsRoute: ({ vno, from = "", to = "", date = "", fromTime = "", toTime = "", limit = 5000, offset = 0 }) => {
+    const params = new URLSearchParams();
+    params.set("vno", vno);
+    if (from || date) params.set("from", from || date);
+    if (to) params.set("to", to);
+    if (fromTime) params.set("fromTime", fromTime);
+    if (toTime) params.set("toTime", toTime);
+    params.set("limit", String(limit));
+    params.set("offset", String(offset));
+    return request(`/gps/route?${params.toString()}`);
+  },
   gpsVehicles: () => request("/gps/vehicles"),
   gpsSync: () => request("/gps/sync", { method: "POST" }),
   gpsSave: (payload) => request("/gps/save", { method: "POST", json: typeof payload === "string" ? { vno: payload } : payload }),

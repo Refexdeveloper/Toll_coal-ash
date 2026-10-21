@@ -2,12 +2,16 @@ import * as XLSX from 'xlsx'
 import { all, get, run } from '../db/index.js'
 import { logAction } from './actionLog.js'
 import { clock } from '../utils/clock.js'
+import { qualifyReads } from './routeQualify.js'
+import { assignChallan, parseLoadedAt } from './challanWindow.js'
 
 const PLATE = /^(?:[A-Z]{2}\d{1,2}[A-Z]{1,3}\d{1,4}|\d{2}BH\d{4}[A-Z]{1,2})$/
 const INLINE = /[A-Z]{2}\s*-?\s*\d{1,2}\s*-?\s*[A-Z]{1,3}\s*-?\s*\d{1,4}|\d{2}\s*-?\s*BH\s*-?\s*\d{4}\s*-?\s*[A-Z]{1,2}/gi
 const HEADER_HINT = /vehicle|reg(?:istration)?|number\s*plate|reg\.?\s*no|vrn|fastag|fleet|truck/i
 const PROJECT_HINT = /project/i
 const CHALLAN_HINT = /challan/i
+const DATE_HINT = /\bdate\b/i
+const TIME_HINT = /loading\s*time|\btime\b/i
 const TRIP_HINT = /\btrip\b/i
 const FROM_HINT = /^(from|source)$|\bfrom\s*(location|site|place|coord)/i
 const TO_HINT = /^(to|destination)$|\bto\s*(location|site|place|coord)/i
@@ -46,6 +50,7 @@ export type FastagVehicle = {
   error_message: string | null
   read_count: number
   fetched_at: string | null
+  loaded_at: string | null
 }
 
 export type FastagRead = {
@@ -67,6 +72,8 @@ export type FastagRead = {
   run_id: number | null
   heading_towards?: string
   heading_code?: 'loading' | 'unloading' | 'unknown'
+  route_match?: 'qualifying' | 'reverse' | 'repeat' | 'unmatched' | 'unverified' | 'ambiguous'
+  route_note?: string
 }
 
 export type SheetVehicle = {
@@ -76,6 +83,7 @@ export type SheetVehicle = {
   trip_id: string | null
   from_location: string | null
   to_location: string | null
+  loaded_at?: string | null
 }
 
 export type SheetRowError = {
@@ -143,10 +151,12 @@ export function extractSheetRows(buffer: Buffer): { rows: SheetVehicle[], errors
   const header = rows[0].map((cell) => String(cell ?? ''))
   const hasHeader = rowIsHeader(rows[0])
   const hinted = hasHeader
-    ? header.map((cell, index) => (HEADER_HINT.test(cell) ? index : -1)).filter((index) => index >= 0)
+    ? header.map((cell, index) => (HEADER_HINT.test(cell) && !/owner/i.test(cell) ? index : -1)).filter((index) => index >= 0)
     : []
   const projectCol = hasHeader ? columnIndex(header, PROJECT_HINT) : -1
   const challanCol = hasHeader ? columnIndex(header, CHALLAN_HINT) : -1
+  const dateCol = hasHeader ? columnIndex(header, DATE_HINT) : -1
+  const timeCol = hasHeader ? columnIndex(header, TIME_HINT) : -1
   const tripCol = hasHeader ? columnIndex(header, TRIP_HINT) : -1
   const fromCol = hasHeader ? columnIndex(header, FROM_HINT) : -1
   const toCol = hasHeader ? columnIndex(header, TO_HINT) : -1
@@ -169,6 +179,7 @@ export function extractSheetRows(buffer: Buffer): { rows: SheetVehicle[], errors
   }
 
   const seen = new Map<string, SheetVehicle>()
+  const challanOwner = new Map<string, string>()
   const errors: SheetRowError[] = []
   const duplicates: SheetRowError[] = []
   let totalRows = 0
@@ -206,9 +217,21 @@ export function extractSheetRows(buffer: Buffer): { rows: SheetVehicle[], errors
     const projectName = projectCol >= 0 ? cellText(row[projectCol], 191) : null
     const fromLocation = fromCol >= 0 ? cellText(row[fromCol], 191) : null
     const toLocation = toCol >= 0 ? cellText(row[toCol], 191) : null
+    const loadedAt = parseLoadedAt(dateCol >= 0 ? row[dateCol] : null, timeCol >= 0 ? row[timeCol] : null)
     for (const plate of plates) {
       if (seen.size >= MAX_VEHICLES) return
       const key = `${plate}|${tripId || ''}|${challanId}`
+      const challanKey = String(challanId || '').toLowerCase()
+      const owner = challanOwner.get(challanKey)
+      if (owner && owner !== plate) {
+        duplicates.push({
+          row: excelRow,
+          vehicle_reg_no: plate,
+          challan_id: challanId,
+          message: `Row ${excelRow}: challan ${challanId} is already used by ${owner}`,
+        })
+        continue
+      }
       if (seen.has(key)) {
         duplicates.push({
           row: excelRow,
@@ -218,6 +241,7 @@ export function extractSheetRows(buffer: Buffer): { rows: SheetVehicle[], errors
         })
         continue
       }
+      challanOwner.set(challanKey, plate)
       seen.set(key, {
         vehicle_reg_no: plate,
         project_name: projectName,
@@ -225,6 +249,7 @@ export function extractSheetRows(buffer: Buffer): { rows: SheetVehicle[], errors
         trip_id: tripId,
         from_location: fromLocation,
         to_location: toLocation,
+        loaded_at: loadedAt,
       })
     }
   })
@@ -316,7 +341,7 @@ const activeRun = new Map<number, { id: number, started_at: string }>()
 
 const BATCH_COLS = `id, filename, source, uploaded_by, vehicle_count, ok_count, error_count, read_count,
   status, error_message, created_at, started_at, finished_at`
-const VEHICLE_COLS = `id, batch_id, vehicle_reg_no, project_name, challan_id, trip_id, from_location, to_location, status, http_status, error_message, read_count, fetched_at`
+const VEHICLE_COLS = `id, batch_id, vehicle_reg_no, project_name, challan_id, trip_id, from_location, to_location, loaded_at, status, http_status, error_message, read_count, fetched_at`
 const READ_COLS = `id, batch_id, vehicle_id, vehicle_reg_no, project_name, challan_id, trip_id, reader_read_time, seq_no, lane_direction,
   toll_plaza_geocode, toll_plaza_name, vehicle_type, created_at, fetched_at, run_id`
 const READ_COLS_R = READ_COLS.split(',').map((column) => `r.${column.trim()}`).join(', ')
@@ -351,7 +376,7 @@ async function recount(batchId: number) {
 }
 
 export async function listBatches() {
-  return all<FastagBatch>(`SELECT ${BATCH_COLS} FROM fastag_batches ORDER BY id DESC LIMIT 100`)
+  return all<FastagBatch>(`SELECT ${BATCH_COLS} FROM fastag_batches ORDER BY id DESC LIMIT 500`)
 }
 
 export async function getBatch(id: number) {
@@ -662,7 +687,7 @@ async function attachHeadings(rows: FastagRead[]): Promise<FastagRead[]> {
     ends.set(key, { from, to, forward })
   }
 
-  return rows.map((row) => {
+  const headed = rows.map((row) => {
     const cardinal = CARDINAL[String(row.lane_direction || '').trim().toUpperCase()]
     if (cardinal == null) return unknown(row)
     const picked = chooseRoute(row)
@@ -698,6 +723,22 @@ async function attachHeadings(rows: FastagRead[]): Promise<FastagRead[]> {
     if (towardUnloading) return { ...row, heading_code: 'unloading' as const, heading_towards: HEADING_LABEL.unloading }
     return { ...row, heading_code: 'loading' as const, heading_towards: HEADING_LABEL.loading }
   })
+
+  return qualifyReads(headed, (row) => {
+    const picked = chooseRoute(row)
+    if (!picked) return null
+    const tolls = picked.list.filter((item) => item.toll_plaza_name)
+    if (!tolls.length) return null
+    const ordered = picked.reversed ? [...tolls].reverse() : tolls
+    return {
+      route_id: picked.list[0].route_id,
+      tolls: ordered.map((item, index) => ({
+        seq_order: index + 1,
+        toll_plaza_name: item.toll_plaza_name,
+        toll_plaza_geocode: item.toll_plaza_geocode,
+      })),
+    }
+  })
 }
 
 export async function getBatchDetail(id: number) {
@@ -721,6 +762,44 @@ export async function getBatchDetail(id: number) {
     [id],
   )
   return { batch, vehicles, reads: await attachHeadings(reads) }
+}
+
+export function parseBatchIds(raw: unknown, limit = 500) {
+  const values = Array.isArray(raw) ? raw : String(raw ?? '').split(',')
+  const ids = [...new Set(values.map((value) => Number(value)).filter((id) => Number.isInteger(id) && id > 0))]
+  if (!ids.length) throw new Error('Select at least one sheet or search')
+  if (ids.length > limit) throw new Error(`Select up to ${limit} sheets or searches at a time`)
+  return ids
+}
+
+export async function getCombinedDetail(ids: number[]) {
+  if (!ids.length) return null
+  const marks = ids.map(() => '?').join(', ')
+  const batches = await all<FastagBatch>(
+    `SELECT ${BATCH_COLS} FROM fastag_batches WHERE id IN (${marks}) ORDER BY id DESC`,
+    ids,
+  )
+  if (!batches.length) return null
+  const found = batches.map((batch) => batch.id)
+  const foundMarks = found.map(() => '?').join(', ')
+  const vehicles = await all<FastagVehicle>(
+    `SELECT ${VEHICLE_COLS} FROM fastag_vehicles WHERE batch_id IN (${foundMarks}) ORDER BY batch_id DESC, id`,
+    found,
+  )
+  const reads = await all<FastagRead>(
+    `SELECT ${READ_COLS_R} FROM fastag_reads r
+     INNER JOIN (
+       SELECT MAX(id) AS id
+       FROM fastag_reads
+       WHERE batch_id IN (${foundMarks})
+       GROUP BY batch_id, vehicle_reg_no,
+         CASE WHEN seq_no IS NOT NULL AND seq_no <> '' THEN seq_no ELSE CONCAT('row:', id) END
+     ) picked ON picked.id = r.id
+     ORDER BY (r.reader_read_time IS NULL), r.reader_read_time DESC, r.id DESC
+     LIMIT ${READ_LIMIT}`,
+    found,
+  )
+  return { batches, vehicles, reads: await attachHeadings(reads) }
 }
 
 function likeTerm(raw: string) {
@@ -824,6 +903,7 @@ export async function createBatch(opts: {
   uploadedBy: number | null
   plates?: string[]
   rows?: SheetVehicle[]
+  file?: Buffer
 }) {
   const incoming = opts.rows?.length
     ? opts.rows
@@ -867,11 +947,14 @@ export async function createBatch(opts: {
     VALUES (?, ?, ?, ?, 0, 0, 0, 'ready', ?)
   `, [opts.filename.slice(0, 255), opts.source, opts.uploadedBy, rows.length, created])
   const batchId = inserted.insertId
+  if (opts.file?.length) {
+    await run(`UPDATE fastag_batches SET source_file = ? WHERE id = ?`, [opts.file, batchId])
+  }
   for (const row of rows) {
     await run(`
-      INSERT INTO fastag_vehicles (batch_id, vehicle_reg_no, project_name, challan_id, trip_id, from_location, to_location, status, read_count)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0)
-    `, [batchId, row.vehicle_reg_no, row.project_name, row.challan_id, row.trip_id, row.from_location, row.to_location])
+      INSERT INTO fastag_vehicles (batch_id, vehicle_reg_no, project_name, challan_id, trip_id, from_location, to_location, loaded_at, status, read_count)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0)
+    `, [batchId, row.vehicle_reg_no, row.project_name, row.challan_id, row.trip_id, row.from_location, row.to_location, row.loaded_at || null])
   }
   const detail = await getBatchDetail(batchId)
   if (!detail) throw new Error('Could not load the uploaded sheet')
@@ -999,20 +1082,41 @@ function readInWindow(record: Record<string, unknown>, window?: FetchWindow) {
   return true
 }
 
-async function fetchOne(batchId: number, vehicle: FastagVehicle, window?: FetchWindow) {
+function groupByPlate(vehicles: FastagVehicle[]) {
+  const groups: FastagVehicle[][] = []
+  const index = new Map<string, FastagVehicle[]>()
+  for (const vehicle of vehicles) {
+    const existing = index.get(vehicle.vehicle_reg_no)
+    if (existing) {
+      existing.push(vehicle)
+      continue
+    }
+    const group = [vehicle]
+    index.set(vehicle.vehicle_reg_no, group)
+    groups.push(group)
+  }
+  return groups
+}
+
+async function fetchGroup(batchId: number, vehicles: FastagVehicle[], window?: FetchWindow) {
   const stamp = clock()
+  const plate = vehicles[0]?.vehicle_reg_no
+  if (!plate) return
+  const markAll = async (patch: Partial<FastagVehicle>) => {
+    for (const vehicle of vehicles) await markVehicle(vehicle.id, patch)
+    await recount(batchId)
+  }
   try {
-    const result = await lookupVehicle(vehicle.vehicle_reg_no)
+    const result = await lookupVehicle(plate)
     const failed = result.ok ? apiErrorMessage(result.body) : (apiErrorMessage(result.body) || result.text || `HTTP ${result.httpStatus}`)
     if (!result.ok || failed) {
-      await markVehicle(vehicle.id, {
+      await markAll({
         status: 'error',
         http_status: result.httpStatus,
         error_message: clip(failed || `HTTP ${result.httpStatus}`, 500),
         read_count: 0,
         fetched_at: stamp,
       })
-      await recount(batchId)
       return
     }
 
@@ -1023,36 +1127,57 @@ async function fetchOne(batchId: number, vehicle: FastagVehicle, window?: FetchW
     const dated = window?.from || window?.to
     if (dated) records = records.filter((record) => readInWindow(record, window))
     if (!records.length) {
-      await markVehicle(vehicle.id, {
+      await markAll({
         status: 'empty',
         http_status: result.httpStatus,
         error_message: dated ? 'No toll reads in this date range' : 'No toll reads returned',
         read_count: 0,
         fetched_at: stamp,
       })
-      await recount(batchId)
       return
     }
 
-    const stored = await addReads(batchId, vehicle, records)
-    await markVehicle(vehicle.id, {
-      status: 'ok',
-      http_status: result.httpStatus,
-      error_message: null,
-      read_count: stored,
-      fetched_at: stamp,
-    })
+    const buckets = new Map<number, Record<string, unknown>[]>()
+    for (const vehicle of vehicles) buckets.set(vehicle.id, [])
+    for (const record of records) {
+      const owner = assignChallan(vehicles, pick(record, 'readerReadTime', 'reader_read_time', 'readTime', 'read_time'))
+      if (!owner) continue
+      buckets.get(owner.id)?.push(record)
+    }
+    const shared = vehicles.length > 1
+    for (const vehicle of vehicles) {
+      const mine = buckets.get(vehicle.id) || []
+      if (!mine.length) {
+        await markVehicle(vehicle.id, {
+          status: 'empty',
+          http_status: result.httpStatus,
+          error_message: shared && !vehicle.loaded_at
+            ? 'Loading date is required so this challan is not mixed with another trip'
+            : 'No toll reads in this challan window',
+          read_count: 0,
+          fetched_at: stamp,
+        })
+        continue
+      }
+      const stored = await addReads(batchId, vehicle, mine)
+      await markVehicle(vehicle.id, {
+        status: 'ok',
+        http_status: result.httpStatus,
+        error_message: null,
+        read_count: stored,
+        fetched_at: stamp,
+      })
+    }
     await recount(batchId)
   } catch (error) {
     const message = error instanceof Error && error.name === 'AbortError'
       ? 'Timed out waiting for the FASTag API'
       : (error instanceof Error ? error.message : 'Lookup failed')
-    await markVehicle(vehicle.id, {
+    await markAll({
       status: 'error',
       error_message: clip(message, 500),
       fetched_at: stamp,
     })
-    await recount(batchId)
   }
 }
 
@@ -1102,8 +1227,8 @@ export async function runBatch(batchId: number, actor?: Actor, window?: FetchWin
   const vehicles = await vehiclesFor(batchId)
   const concurrency = Math.max(1, Math.min(8, Number(process.env.FASTAG_CONCURRENCY || 4)))
   try {
-    await mapPool(vehicles, concurrency, async (vehicle) => {
-      await fetchOne(batchId, vehicle, window)
+    await mapPool(groupByPlate(vehicles), concurrency, async (group) => {
+      await fetchGroup(batchId, group, window)
     })
     await run(`UPDATE fastag_batches SET status = 'done', finished_at = ? WHERE id = ?`, [clock(), batchId])
     await recount(batchId)
@@ -1143,11 +1268,13 @@ async function finishBatch(batchId: number, status: 'done' | 'failed', errorMess
 }
 
 async function runRetry(batchId: number, failedIds: number[], actor?: Actor) {
-  const vehicles = (await vehiclesFor(batchId)).filter((row) => failedIds.includes(row.id))
+  const vehicles = await vehiclesFor(batchId)
+  const plates = new Set(vehicles.filter((row) => failedIds.includes(row.id)).map((row) => row.vehicle_reg_no))
+  const involved = vehicles.filter((row) => plates.has(row.vehicle_reg_no))
   const concurrency = Math.max(1, Math.min(8, Number(process.env.FASTAG_CONCURRENCY || 4)))
   try {
-    await mapPool(vehicles, concurrency, async (vehicle) => {
-      await fetchOne(batchId, vehicle)
+    await mapPool(groupByPlate(involved), concurrency, async (group) => {
+      await fetchGroup(batchId, group)
     })
     await closeRun(batchId)
     await finishBatch(batchId, 'done')
@@ -1243,6 +1370,7 @@ export type ExportFilters = {
   toTime?: string
   vehicles?: string
   heading?: string
+  allCaptured?: boolean
 }
 
 function matchesExport(row: FastagRead, filters: ExportFilters) {
@@ -1275,8 +1403,7 @@ function matchesExport(row: FastagRead, filters: ExportFilters) {
   }
   const plates = String(filters.vehicles || '').split(',').map((item) => item.trim()).filter(Boolean)
   if (plates.length && !plates.includes(row.vehicle_reg_no)) return false
-  const heading = String(filters.heading || '').trim()
-  if (heading && (row.heading_code || 'unknown') !== heading) return false
+  if (!filters.allCaptured && row.route_match && !['qualifying', 'unverified', 'ambiguous'].includes(row.route_match)) return false
   return true
 }
 
@@ -1308,7 +1435,6 @@ export async function exportBatchExcel(id: number, filters: ExportFilters = {}, 
     'Trip ID': row.trip_id || '',
     'Toll entry time': row.reader_read_time || '',
     ...(includeDirection ? { Direction: row.lane_direction || '' } : {}),
-    'Heading Towards': row.heading_towards || 'Unknown / Unverified',
     'Toll plaza': row.toll_plaza_name || '',
     Geocode: row.toll_plaza_geocode || '',
     Type: row.vehicle_type || '',
@@ -1322,7 +1448,6 @@ export async function exportBatchExcel(id: number, filters: ExportFilters = {}, 
     'Trip ID': '',
     'Toll entry time': '',
     Direction: '',
-    'Heading Towards': '',
     'Toll plaza': '',
     Geocode: '',
     Type: '',
@@ -1335,8 +1460,159 @@ export async function exportBatchExcel(id: number, filters: ExportFilters = {}, 
   return {
     filename: `fastag-responses-${stamp.file}.xlsx`,
     buffer,
-    filtered: Boolean(filters.q || filters.project || filters.plaza || filters.from || filters.to || filters.vehicles || filters.heading),
+    filtered: Boolean(filters.q || filters.project || filters.plaza || filters.from || filters.to || filters.vehicles),
     count: filtered.length,
+  }
+}
+
+export async function exportBatchesExcel(rawIds: number[], filters: ExportFilters = {}, includeDirection = false) {
+  const ids = parseBatchIds(rawIds)
+  const detail = await getCombinedDetail(ids)
+  if (!detail) return null
+  const names = new Map(detail.batches.map((batch) => [
+    batch.id,
+    batch.source === 'manual' ? `Search ${batch.filename}` : batch.filename,
+  ]))
+  const stamp = stampParts()
+  const filtered = detail.reads.filter((row) => matchesExport(row, filters))
+  const rows = filtered.map((row) => ({
+    Source: names.get(row.batch_id) || '',
+    Vehicle: row.vehicle_reg_no,
+    Project: row.project_name || '',
+    'Challan ID': row.challan_id || '',
+    'Trip ID': row.trip_id || '',
+    'Toll entry time': row.reader_read_time || '',
+    ...(includeDirection ? { Direction: row.lane_direction || '' } : {}),
+    'Toll plaza': row.toll_plaza_name || '',
+    Geocode: row.toll_plaza_geocode || '',
+    Type: row.vehicle_type || '',
+    'Fetched at': row.fetched_at || row.created_at || '',
+    'Exported at': stamp.label,
+  }))
+  const sheet = XLSX.utils.json_to_sheet(rows.length ? rows : [{
+    Source: '',
+    Vehicle: '',
+    Project: '',
+    'Challan ID': '',
+    'Trip ID': '',
+    'Toll entry time': '',
+    Direction: '',
+    'Toll plaza': '',
+    Geocode: '',
+    Type: '',
+    'Fetched at': '',
+    'Exported at': stamp.label,
+  }])
+  const book = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(book, sheet, 'Stored responses')
+  return {
+    filename: `fastag-responses-${stamp.file}.xlsx`,
+    buffer: XLSX.write(book, { type: 'buffer', bookType: 'xlsx' }) as Buffer,
+    filtered: Boolean(filters.q || filters.project || filters.plaza || filters.from || filters.to || filters.vehicles),
+    count: filtered.length,
+    sheets: detail.batches.length,
+  }
+}
+
+function downloadName(name: string) {
+  const clean = String(name || 'uploaded.xlsx').replace(/[\\/:*?"<>|\r\n]/g, '_').slice(0, 180)
+  return /\.(xlsx|xls|csv)$/i.test(clean) ? clean : `${clean}.xlsx`
+}
+
+function workbookType(name: string) {
+  if (/\.csv$/i.test(name)) return 'text/csv; charset=utf-8'
+  if (/\.xls$/i.test(name)) return 'application/vnd.ms-excel'
+  return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+}
+
+function excelSheetName(filename: string, used: Set<string>) {
+  const suffixFree = filename.replace(/\.(xlsx|xls|csv)$/i, '').replace(/[\\/?*[\]:]/g, ' ').trim() || 'Sheet'
+  let name = suffixFree.slice(0, 31)
+  let n = 2
+  while (used.has(name)) {
+    const suffix = ` ${n}`
+    name = `${suffixFree.slice(0, 31 - suffix.length)}${suffix}`
+    n += 1
+  }
+  used.add(name)
+  return name
+}
+
+async function rebuiltUpload(batch: FastagBatch) {
+  const vehicles = await all<FastagVehicle>(
+    `SELECT ${VEHICLE_COLS} FROM fastag_vehicles WHERE batch_id = ? ORDER BY id`,
+    [batch.id],
+  )
+  const rows = vehicles.map((row, index) => {
+    const loaded = String(row.loaded_at || '')
+    const date = loaded.slice(0, 10)
+    const time = loaded.length >= 16 ? loaded.slice(11, 19) : ''
+    return {
+      'S.No': index + 1,
+      Date: date,
+      'Loading Time': time,
+      'Project Name': row.project_name || '',
+      'Challan ID': row.challan_id || '',
+      'Vehicle No': row.vehicle_reg_no,
+      'Trip ID': row.trip_id || '',
+      From: row.from_location || '',
+      To: row.to_location || '',
+    }
+  })
+  const sheet = XLSX.utils.json_to_sheet(rows.length ? rows : [{
+    'S.No': '',
+    Date: '',
+    'Loading Time': '',
+    'Project Name': '',
+    'Challan ID': '',
+    'Vehicle No': '',
+    'Trip ID': '',
+    From: '',
+    To: '',
+  }])
+  const book = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(book, sheet, 'Uploaded rows')
+  return XLSX.write(book, { type: 'buffer', bookType: 'xlsx' }) as Buffer
+}
+
+export async function uploadedSheetFile(id: number) {
+  const batch = await getBatch(id)
+  if (!batch || batch.source === 'manual') return null
+  const stored = await get<{ source_file: Buffer | null }>(`SELECT source_file FROM fastag_batches WHERE id = ?`, [id])
+  const original = stored?.source_file
+  const buffer = original && (Buffer.isBuffer(original) ? original : Buffer.from(original))
+  if (buffer?.length) {
+    const filename = downloadName(batch.filename)
+    return { filename, buffer, type: workbookType(filename), rebuilt: false }
+  }
+  const filename = downloadName(batch.filename).replace(/\.(xls|csv)$/i, '.xlsx')
+  return { filename, buffer: await rebuiltUpload(batch), type: workbookType(filename), rebuilt: true }
+}
+
+export async function uploadedSheetsWorkbook(rawIds: number[]) {
+  const ids = parseBatchIds(rawIds)
+  const files = []
+  for (const id of ids) {
+    const file = await uploadedSheetFile(id)
+    if (file) files.push(file)
+  }
+  if (!files.length) return null
+  if (files.length === 1) return files[0]
+  const book = XLSX.utils.book_new()
+  const used = new Set<string>()
+  for (const file of files) {
+    const opened = XLSX.read(file.buffer, { type: 'buffer' })
+    const first = opened.Sheets[opened.SheetNames[0]]
+    if (!first) continue
+    XLSX.utils.book_append_sheet(book, first, excelSheetName(file.filename, used))
+  }
+  const stamp = stampParts()
+  return {
+    filename: `uploaded-sheets-${stamp.file}.xlsx`,
+    buffer: XLSX.write(book, { type: 'buffer', bookType: 'xlsx' }) as Buffer,
+    type: workbookType('book.xlsx'),
+    rebuilt: files.some((file) => file.rebuilt),
+    count: files.length,
   }
 }
 
@@ -1357,7 +1633,6 @@ export async function exportReadsByIds(rawIds: number[], includeDirection = fals
     'Trip ID': row.trip_id || '',
     'Toll entry time': row.reader_read_time || '',
     ...(includeDirection ? { Direction: row.lane_direction || '' } : {}),
-    'Heading Towards': row.heading_towards || 'Unknown / Unverified',
     'Toll plaza': row.toll_plaza_name || '',
     Geocode: row.toll_plaza_geocode || '',
     Type: row.vehicle_type || '',

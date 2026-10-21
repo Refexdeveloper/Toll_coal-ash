@@ -48,6 +48,44 @@ function mapsHref(lat, lon) {
 }
 
 /** Interactive Tile Map with Animated Moving Vehicle */
+function fitRoute(points, width, height) {
+  if (!points.length || width < 50 || height < 50) return null;
+  let minLat = Infinity;
+  let maxLat = -Infinity;
+  let minLng = Infinity;
+  let maxLng = -Infinity;
+  points.forEach((point) => {
+    const lat = Number(point.lat);
+    const lng = Number(point.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+    minLat = Math.min(minLat, lat);
+    maxLat = Math.max(maxLat, lat);
+    minLng = Math.min(minLng, lng);
+    maxLng = Math.max(maxLng, lng);
+  });
+  if (!Number.isFinite(minLat)) return null;
+  const latPad = Math.max((maxLat - minLat) * 0.2, 0.02);
+  const lngPad = Math.max((maxLng - minLng) * 0.2, 0.02);
+  minLat -= latPad;
+  maxLat += latPad;
+  minLng -= lngPad;
+  maxLng += lngPad;
+  const center = { lat: (minLat + maxLat) / 2, lng: (minLng + maxLng) / 2 };
+  let zoom = 13;
+  for (let level = MAX_ZOOM; level >= MIN_ZOOM; level -= 1) {
+    const northWest = project(maxLat, minLng, level);
+    const southEast = project(minLat, maxLng, level);
+    const spanX = Math.abs(southEast.x - northWest.x) * TILE_SIZE;
+    const spanY = Math.abs(southEast.y - northWest.y) * TILE_SIZE;
+    if (spanX <= width - 80 && spanY <= height - 80) {
+      zoom = level;
+      break;
+    }
+    zoom = level;
+  }
+  return { center, zoom };
+}
+
 function LiveMovingMap({
   lat,
   lon,
@@ -59,6 +97,10 @@ function LiveMovingMap({
   historyPings = [],
   isSimulatingMotion = false,
   onToggleMotionSimulation,
+  routeMode = false,
+  routePoints = [],
+  routeIndex = 0,
+  onRoutePoint,
 }) {
   const containerRef = useRef(null);
   const dragRef = useRef(null);
@@ -116,8 +158,22 @@ function LiveMovingMap({
     return () => clearInterval(interval);
   }, [isSimulatingMotion, heading]);
 
-  const activeLat = (Number(lat) || 24.201772) + simOffset.latOffset;
-  const activeLng = (Number(lon) || 82.670205) + simOffset.lngOffset;
+  const routeFitKey = routeMode ? `${routePoints.length}:${routePoints[0]?.id || ""}:${routePoints[routePoints.length - 1]?.id || ""}` : "";
+  useEffect(() => {
+    if (!routeMode) return;
+    const fitted = fitRoute(routePoints, dimensions.width, dimensions.height);
+    if (!fitted) return;
+    setCenter(fitted.center);
+    setZoom(fitted.zoom);
+  }, [routeMode, routeFitKey, dimensions.width, dimensions.height]);
+
+  const playbackPoint = routeMode ? routePoints[Math.min(routeIndex, Math.max(routePoints.length - 1, 0))] : null;
+  const activeLat = playbackPoint
+    ? Number(playbackPoint.lat)
+    : (Number(lat) || 24.201772) + simOffset.latOffset;
+  const activeLng = playbackPoint
+    ? Number(playbackPoint.lon)
+    : (Number(lon) || 82.670205) + simOffset.lngOffset;
   const displaySpeed = isSimulatingMotion
     ? Math.max(38, Number(speed) || 42)
     : Number(speed) || 0;
@@ -156,22 +212,21 @@ function LiveMovingMap({
       y: vehProj.y * TILE_SIZE - originY,
     };
 
-    const hPoints = (historyPings || [])
-      .filter((p) => p.lat != null && p.lon != null)
-      .slice(0, 40)
-      .map((p, idx) => {
-        const hp = project(Number(p.lat), Number(p.lon), zoom);
-        return {
-          id: p.id || idx,
-          x: hp.x * TILE_SIZE - originX,
-          y: hp.y * TILE_SIZE - originY,
-          time: p.gps_time,
-          speed: p.spd,
-        };
-      });
+    const sourcePoints = routeMode ? routePoints : (historyPings || []).filter((p) => p.lat != null && p.lon != null).slice(0, 40);
+    const hPoints = sourcePoints.map((p, idx) => {
+      const hp = project(Number(p.lat), Number(p.lon), zoom);
+      return {
+        id: p.id || idx,
+        index: idx,
+        x: hp.x * TILE_SIZE - originX,
+        y: hp.y * TILE_SIZE - originY,
+        time: p.gps_time,
+        speed: p.spd,
+      };
+    });
 
     return { tiles: tileList, vehicleScreen: vScreen, historyScreenPoints: hPoints };
-  }, [center, zoom, dimensions, activeLat, activeLng, historyPings]);
+  }, [center, zoom, dimensions, activeLat, activeLng, historyPings, routeMode, routePoints]);
 
   // Mouse pan handlers
   function handlePointerDown(e) {
@@ -275,13 +330,13 @@ function LiveMovingMap({
           <polyline
             points={historyScreenPoints.map((p) => `${p.x},${p.y}`).join(" ")}
             fill="none"
-            stroke="#2563EB"
-            strokeWidth="3.5"
-            strokeDasharray="6,4"
-            opacity="0.75"
+            stroke={routeMode ? "#1D4ED8" : "#2563EB"}
+            strokeWidth={routeMode ? 4 : 3.5}
+            strokeDasharray={routeMode ? undefined : "6,4"}
+            opacity={routeMode ? 0.9 : 0.75}
           />
         )}
-        {historyScreenPoints.map((p, i) => (
+        {!routeMode && historyScreenPoints.map((p, i) => (
           <circle
             key={p.id}
             cx={p.x}
@@ -294,6 +349,37 @@ function LiveMovingMap({
           />
         ))}
       </svg>
+
+      {routeMode && historyScreenPoints.map((point, index) => {
+        const last = historyScreenPoints.length - 1;
+        const selected = index === routeIndex;
+        const start = index === 0;
+        const end = index === last;
+        return (
+          <button
+            key={point.id}
+            type="button"
+            title={point.time || "Saved GPS point"}
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={() => onRoutePoint?.(index)}
+            style={{
+              position: "absolute",
+              left: point.x,
+              top: point.y,
+              transform: "translate(-50%, -50%)",
+              width: selected ? 18 : start || end ? 16 : 12,
+              height: selected ? 18 : start || end ? 16 : 12,
+              borderRadius: "50%",
+              border: "2px solid #fff",
+              background: start ? "#059669" : end ? "#DC2626" : selected ? "#D97706" : "#2563EB",
+              boxShadow: "0 1px 4px rgba(15, 23, 42, 0.35)",
+              zIndex: selected ? 18 : 12,
+              padding: 0,
+              cursor: "pointer",
+            }}
+          />
+        );
+      })}
 
       {/* Animated Moving Vehicle Marker */}
       <div
@@ -317,7 +403,7 @@ function LiveMovingMap({
             background: isMoving
               ? "radial-gradient(circle, rgba(16, 185, 129, 0.4) 0%, rgba(16, 185, 129, 0) 70%)"
               : "radial-gradient(circle, rgba(37, 99, 235, 0.3) 0%, rgba(37, 99, 235, 0) 70%)",
-            animation: "gpsRadarWave 2s infinite ease-out",
+            animation: routeMode ? "none" : "gpsRadarWave 2s infinite ease-out",
           }}
         />
 
@@ -328,7 +414,7 @@ function LiveMovingMap({
             left: 0,
             top: 0,
             transform: "translate(-50%, -50%)",
-            animation: isMoving ? "truckTireRumble 0.4s infinite ease-in-out" : "none",
+            animation: routeMode || !isMoving ? "none" : "truckTireRumble 0.4s infinite ease-in-out",
           }}
         >
           {/* Circular Badge with Refex Moving Truck Icon */}
@@ -432,7 +518,7 @@ function LiveMovingMap({
           }}
         >
           <i className="fas fa-circle" style={{ fontSize: 7, color: isMoving ? "#10B981" : "#64748B" }} />
-          {isMoving ? "MOVING IN TRANSIT" : ignition ? "IGNITION ON (IDLE)" : "IGNITION OFF"}
+          {routeMode ? "SAVED SNAPSHOT" : isMoving ? "MOVING IN TRANSIT" : ignition ? "IGNITION ON (IDLE)" : "IGNITION OFF"}
         </span>
         <span style={{ color: "#2563EB", fontWeight: 700 }}>
           {displaySpeed} km/h
@@ -454,7 +540,7 @@ function LiveMovingMap({
           gap: 6,
         }}
       >
-        <button
+        {onToggleMotionSimulation ? <button
           type="button"
           onClick={onToggleMotionSimulation}
           className={`btn btn-xs ${isSimulatingMotion ? "btn-success" : "btn-default"}`}
@@ -470,7 +556,7 @@ function LiveMovingMap({
         >
           <i className={`fas fa-truck-moving ${isSimulatingMotion ? "fa-bounce" : ""}`} />
           <span>{isSimulatingMotion ? "Moving: Active" : "Simulate Motion"}</span>
-        </button>
+        </button> : null}
 
         <button
           type="button"
@@ -564,6 +650,7 @@ export default function GpsTracking() {
   const [selectedGps, setSelectedGps] = useState(() => new Set());
   const [exportingGps, setExportingGps] = useState(false);
   const [knownVehicles, setKnownVehicles] = useState([]);
+  const [vehiclesNote, setVehiclesNote] = useState("");
   const [loading, setLoading] = useState(false);
   const [savingRecord, setSavingRecord] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -573,8 +660,22 @@ export default function GpsTracking() {
 
   // History filters
   const [dateFrom, setDateFrom] = useState("");
+  const [timeFrom, setTimeFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  const [timeTo, setTimeTo] = useState("");
+  const [historyVehicle, setHistoryVehicle] = useState("CG04NU2465");
   const [historyLimit, setHistoryLimit] = useState(200);
+  const [collectionStatus, setCollectionStatus] = useState(null);
+  const [routeVehicle, setRouteVehicle] = useState("CG04NU2465");
+  const [routeFromDate, setRouteFromDate] = useState("");
+  const [routeToDate, setRouteToDate] = useState("");
+  const [routeStart, setRouteStart] = useState("");
+  const [routeEnd, setRouteEnd] = useState("");
+  const [routeResult, setRouteResult] = useState(null);
+  const [routeBusy, setRouteBusy] = useState(false);
+  const [routeIndex, setRouteIndex] = useState(0);
+  const [routePlaying, setRoutePlaying] = useState(false);
+  const [routeSpeed, setRouteSpeed] = useState(1);
 
   // Ingest / Simulate Modal
   const [showIngestModal, setShowIngestModal] = useState(false);
@@ -595,11 +696,10 @@ export default function GpsTracking() {
   async function loadKnownVehicles() {
     try {
       const res = await api.gpsVehicles();
-      if (res?.vehicles) {
-        setKnownVehicles(res.vehicles);
-      }
-    } catch {
-      // silent
+      setKnownVehicles(Array.isArray(res?.vehicles) ? res.vehicles : []);
+      setVehiclesNote("");
+    } catch (error) {
+      setVehiclesNote(error?.message || "Could not load vehicle numbers");
     }
   }
 
@@ -619,9 +719,16 @@ export default function GpsTracking() {
   }
 
   // Reload history without altering live view
-  async function reloadHistory(vno) {
+  async function reloadHistory(vno = historyVehicle) {
     try {
-      const histRes = await api.gpsHistory(vno, dateFrom, dateTo, historyLimit);
+      const histRes = await api.gpsHistory({
+        vno,
+        from: dateFrom,
+        to: dateTo,
+        fromTime: timeFrom,
+        toTime: timeTo,
+        limit: historyLimit,
+      });
       setHistoryRows(histRes?.rows || []);
     } catch {
       // silent
@@ -671,7 +778,15 @@ export default function GpsTracking() {
       }
 
       // 2. Old / History Data
-      const histRes = await api.gpsHistory(vno, dateFrom, dateTo, historyLimit);
+      const histRes = await api.gpsHistory({
+        vno,
+        from: dateFrom,
+        to: dateTo,
+        fromTime: timeFrom,
+        toTime: timeTo,
+        limit: historyLimit,
+      });
+      setHistoryVehicle(vno);
       const rows = histRes?.rows || [];
       setHistoryRows(rows);
       if (!liveRes?.data && rows.length > 0) {
@@ -691,7 +806,51 @@ export default function GpsTracking() {
   useEffect(() => {
     fetchGpsData("CG04NU2465", false);
     loadKnownVehicles();
+    api.gpsCollectionStatus().then(setCollectionStatus).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (!routePlaying) return undefined;
+    const total = routeResult?.points?.length || 0;
+    if (total < 2) return undefined;
+    const timer = window.setInterval(() => {
+      setRouteIndex((current) => {
+        if (current >= total - 1) {
+          setRoutePlaying(false);
+          return current;
+        }
+        return current + 1;
+      });
+    }, Math.max(200, Math.round(1000 / Number(routeSpeed || 1))));
+    return () => window.clearInterval(timer);
+  }, [routePlaying, routeSpeed, routeResult]);
+
+  async function loadRoute(event) {
+    event?.preventDefault();
+    const vno = routeVehicle.trim().toUpperCase();
+    if (vno.length < 4 || (!routeFromDate && !routeToDate)) {
+      notify.error("Choose a vehicle number and a from and to date");
+      return;
+    }
+    setRouteBusy(true);
+    setRoutePlaying(false);
+    try {
+      const data = await api.gpsRoute({
+        vno,
+        from: routeFromDate || routeToDate,
+        to: routeToDate || routeFromDate,
+        fromTime: routeStart,
+        toTime: routeEnd,
+      });
+      setRouteResult(data);
+      setRouteIndex(0);
+      if (!data?.points?.length) notify.info("No stored GPS points for that vehicle and time");
+    } catch (error) {
+      notify.error(error.message);
+    } finally {
+      setRouteBusy(false);
+    }
+  }
 
   // Auto-refresh interval (every 15 seconds)
   useEffect(() => {
@@ -743,6 +902,21 @@ export default function GpsTracking() {
     return knownVehicles;
   }, [knownVehicles, vehicleFilterStatus]);
 
+  const routePlates = useMemo(() => {
+    const seen = new Set();
+    const plates = [];
+    const add = (value) => {
+      const plate = String(value || "").trim().toUpperCase();
+      if (!plate || seen.has(plate)) return;
+      seen.add(plate);
+      plates.push(plate);
+    };
+    knownVehicles.forEach((vehicle) => add(vehicle.vno));
+    add(routeVehicle);
+    plates.sort((left, right) => left.localeCompare(right));
+    return plates;
+  }, [knownVehicles, routeVehicle]);
+
   const currentMapData = useMemo(() => {
     if (activeTab === "live") {
       return liveData;
@@ -755,9 +929,7 @@ export default function GpsTracking() {
       {/* Datalist for autocomplete on vehicle number */}
       <datalist id="gps-vehicle-list">
         {knownVehicles.map((v) => (
-          <option key={v.vno} value={v.vno}>
-            {v.vno} — {Number(v.last_spd) > 0 ? `${Number(v.last_spd).toFixed(0)} km/h` : "Stopped"} | Ign: {v.last_ign ? "ON" : "OFF"}
-          </option>
+          <option key={v.vno} value={String(v.vno || "").toUpperCase()} />
         ))}
       </datalist>
 
@@ -997,6 +1169,27 @@ export default function GpsTracking() {
 
         <button
           type="button"
+          onClick={() => { setActiveTab("route"); loadKnownVehicles(); }}
+          style={{
+            padding: "10px 20px",
+            fontSize: 14,
+            fontWeight: 700,
+            border: "none",
+            background: "none",
+            cursor: "pointer",
+            borderBottom: activeTab === "route" ? "3px solid var(--main-theme-color)" : "3px solid transparent",
+            color: activeTab === "route" ? "var(--main-theme-color)" : "var(--color-muted)",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 8,
+          }}
+        >
+          <i className="fas fa-route" />
+          <span>Historical Route</span>
+        </button>
+
+        <button
+          type="button"
           onClick={() => setActiveTab("history")}
           style={{
             padding: "10px 20px",
@@ -1019,6 +1212,98 @@ export default function GpsTracking() {
           </span>
         </button>
       </div>
+
+      {activeTab === "route" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <form onSubmit={loadRoute} className="box box-default">
+            <div className="box-body" style={{ padding: "14px 20px", display: "flex", flexWrap: "wrap", gap: 14, alignItems: "flex-end" }}>
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 700, color: "var(--color-muted)", marginBottom: 4, display: "block" }}>Vehicle number</label>
+                <select className="form-control" value={routeVehicle} onChange={(event) => setRouteVehicle(event.target.value.toUpperCase())} style={{ height: 36, width: 200 }}>
+                  {routeVehicle === "" && <option value="">Select vehicle</option>}
+                  {routePlates.map((plate) => (
+                    <option key={plate} value={plate}>{plate}</option>
+                  ))}
+                </select>
+                {vehiclesNote ? <p className="text-muted" style={{ margin: "4px 0 0", fontSize: 12 }}>{vehiclesNote}</p> : null}
+              </div>
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 700, color: "var(--color-muted)", marginBottom: 4, display: "block" }}>From date</label>
+                <input type="date" className="form-control" value={routeFromDate} onChange={(event) => setRouteFromDate(event.target.value)} style={{ height: 36 }} />
+              </div>
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 700, color: "var(--color-muted)", marginBottom: 4, display: "block" }}>To date</label>
+                <input type="date" className="form-control" value={routeToDate} onChange={(event) => setRouteToDate(event.target.value)} style={{ height: 36 }} />
+              </div>
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 700, color: "var(--color-muted)", marginBottom: 4, display: "block" }}>Start time</label>
+                <input type="time" step="60" className="form-control" value={routeStart} onChange={(event) => setRouteStart(event.target.value)} style={{ height: 36 }} />
+              </div>
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 700, color: "var(--color-muted)", marginBottom: 4, display: "block" }}>End time</label>
+                <input type="time" step="60" className="form-control" value={routeEnd} onChange={(event) => setRouteEnd(event.target.value)} style={{ height: 36 }} />
+              </div>
+              <button type="submit" className="btn btn-primary" disabled={routeBusy} style={{ height: 36 }}>{routeBusy ? "Loading…" : "Show route"}</button>
+            </div>
+          </form>
+
+          {routeResult ? (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
+                <Kpi label="First GPS time" value={routeResult.summary?.first_gps_time || "—"} hint="Oldest saved snapshot" icon="fa-clock" />
+                <Kpi label="Last GPS time" value={routeResult.summary?.last_gps_time || "—"} hint="Newest saved snapshot" icon="fa-flag-checkered" />
+                <Kpi label="GPS points" value={routeResult.summary?.points ?? 0} hint={routeResult.truncated ? `Showing ${routeResult.points.length} of ${routeResult.total}` : "Stored snapshots"} icon="fa-map-marker-alt" />
+                <Kpi label="Estimated distance" value={`${Number(routeResult.summary?.estimated_distance_km || 0).toFixed(2)} km`} hint="Straight lines between snapshots" icon="fa-ruler" />
+              </div>
+              <p className="text-muted" style={{ margin: 0 }}>
+                The line joins the saved GPS coordinates in time order. It is an estimate, not the road the vehicle drove. Automatic snapshots are about two hours apart, so the gaps between points are not filled in.
+              </p>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+                <button type="button" className="btn btn-theme btn-sm" disabled={routePlaying || (routeResult.points || []).length < 2} onClick={() => { if (routeIndex >= (routeResult.points.length - 1)) setRouteIndex(0); setRoutePlaying(true); }}>Play</button>
+                <button type="button" className="btn btn-default btn-sm" disabled={!routePlaying} onClick={() => setRoutePlaying(false)}>Pause</button>
+                <button type="button" className="btn btn-default btn-sm" onClick={() => { setRoutePlaying(false); setRouteIndex(0); }}>Reset</button>
+                <label style={{ display: "inline-flex", alignItems: "center", gap: 8, margin: 0 }}>
+                  <span>Playback speed</span>
+                  <select className="form-control" value={routeSpeed} onChange={(event) => setRouteSpeed(Number(event.target.value))} style={{ width: 90, height: 32 }}>
+                    {[1, 2, 4, 8].map((speed) => <option key={speed} value={speed}>{speed}x</option>)}
+                  </select>
+                </label>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(260px, 340px) 1fr", gap: 16 }}>
+                <Box title="Selected snapshot">
+                  {routeResult.points?.[routeIndex] ? (
+                    <div>
+                      <p><strong>GPS time</strong> {routeResult.points[routeIndex].gps_time}</p>
+                      <p><strong>Speed</strong> {Number(routeResult.points[routeIndex].spd || 0).toFixed(0)} km/h</p>
+                      <p><strong>Ignition</strong> {routeResult.points[routeIndex].ign ? "ON" : "OFF"}</p>
+                      <p><strong>Fuel</strong> {routeResult.points[routeIndex].fuel || "unknown"}</p>
+                      <p><strong>Coordinates</strong> {Number(routeResult.points[routeIndex].lat).toFixed(6)}, {Number(routeResult.points[routeIndex].lon).toFixed(6)}</p>
+                      <p className="text-muted">Point {routeIndex + 1} of {routeResult.points.length}. Green is the start and red is the end.</p>
+                    </div>
+                  ) : <p className="text-muted">No stored points in this range.</p>}
+                </Box>
+                <Box title={`Route playback — ${routeResult.vno}`}>
+                  {(routeResult.points || []).length ? (
+                    <LiveMovingMap
+                      routeMode
+                      routePoints={routeResult.points}
+                      routeIndex={routeIndex}
+                      onRoutePoint={(index) => { setRoutePlaying(false); setRouteIndex(index); }}
+                      lat={routeResult.points[routeIndex]?.lat}
+                      lon={routeResult.points[routeIndex]?.lon}
+                      heading={routeResult.points[routeIndex]?.crs || 0}
+                      speed={routeResult.points[routeIndex]?.spd || 0}
+                      ignition={Boolean(routeResult.points[routeIndex]?.ign)}
+                      vehicleNo={routeResult.vno}
+                      time={routeResult.points[routeIndex]?.gps_time}
+                    />
+                  ) : <p className="text-muted">No stored GPS points for this vehicle and time.</p>}
+                </Box>
+              </div>
+            </>
+          ) : <p className="text-muted">Choose a vehicle and a from and to date to draw the stored journey.</p>}
+        </div>
+      )}
 
       {/* TAB 1: LIVE DATA & MOVING MAP */}
       {activeTab === "live" && (
@@ -1165,6 +1450,21 @@ export default function GpsTracking() {
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 14, alignItems: "flex-end" }}>
                   <div>
                     <label style={{ fontSize: 11, fontWeight: 700, color: "var(--color-muted)", marginBottom: 4, display: "block" }}>
+                      Vehicle number
+                    </label>
+                    <input
+                      type="text"
+                      className="form-control"
+                      list="gps-vehicle-list"
+                      value={historyVehicle}
+                      onChange={(e) => setHistoryVehicle(e.target.value.toUpperCase())}
+                      placeholder="All vehicles"
+                      style={{ height: 36, width: 180, textTransform: "uppercase" }}
+                    />
+                  </div>
+
+                  <div>
+                    <label style={{ fontSize: 11, fontWeight: 700, color: "var(--color-muted)", marginBottom: 4, display: "block" }}>
                       From Date
                     </label>
                     <input
@@ -1178,6 +1478,13 @@ export default function GpsTracking() {
 
                   <div>
                     <label style={{ fontSize: 11, fontWeight: 700, color: "var(--color-muted)", marginBottom: 4, display: "block" }}>
+                      From time
+                    </label>
+                    <input type="time" step="1" className="form-control" value={timeFrom} onChange={(e) => setTimeFrom(e.target.value)} style={{ height: 36 }} />
+                  </div>
+
+                  <div>
+                    <label style={{ fontSize: 11, fontWeight: 700, color: "var(--color-muted)", marginBottom: 4, display: "block" }}>
                       To Date
                     </label>
                     <input
@@ -1187,6 +1494,13 @@ export default function GpsTracking() {
                       onChange={(e) => setDateTo(e.target.value)}
                       style={{ height: 36 }}
                     />
+                  </div>
+
+                  <div>
+                    <label style={{ fontSize: 11, fontWeight: 700, color: "var(--color-muted)", marginBottom: 4, display: "block" }}>
+                      To time
+                    </label>
+                    <input type="time" step="1" className="form-control" value={timeTo} onChange={(e) => setTimeTo(e.target.value)} style={{ height: 36 }} />
                   </div>
 
                   <div>
@@ -1209,21 +1523,24 @@ export default function GpsTracking() {
                   <button
                     type="button"
                     className="btn btn-primary"
-                    onClick={() => reloadHistory(activeVehicle)}
+                    onClick={() => reloadHistory(historyVehicle.trim())}
                     style={{ height: 36, display: "inline-flex", alignItems: "center", gap: 6, fontWeight: 600 }}
                   >
                     <i className="fas fa-filter" />
                     <span>Filter History</span>
                   </button>
 
-                  {(dateFrom || dateTo) && (
+                  {(dateFrom || timeFrom || dateTo || timeTo || historyVehicle) && (
                     <button
                       type="button"
                       className="btn btn-default"
                       onClick={() => {
                         setDateFrom("");
+                        setTimeFrom("");
                         setDateTo("");
-                        api.gpsHistory(activeVehicle, "", "", historyLimit).then((res) => setHistoryRows(res?.rows || []));
+                        setTimeTo("");
+                        setHistoryVehicle("");
+                        api.gpsHistory({ limit: historyLimit }).then((res) => setHistoryRows(res?.rows || [])).catch(() => {});
                       }}
                       style={{ height: 36 }}
                     >
@@ -1247,24 +1564,30 @@ export default function GpsTracking() {
           </div>
 
           {/* Map View for selected ping */}
-          <Box title={`Route Breadcrumbs Map — ${pickedPing ? `Ping at ${pickedPing.gps_time}` : activeVehicle}`}>
+          {collectionStatus ? (
+            <p className="text-muted" style={{ margin: 0 }}>
+              Automatic collection is {collectionStatus.enabled ? `on, every ${collectionStatus.interval_minutes % 60 === 0 ? `${collectionStatus.interval_minutes / 60} hour${collectionStatus.interval_minutes === 60 ? "" : "s"}` : `${collectionStatus.interval_minutes} minutes`}` : "paused"}.
+              {" "}Last successful save: {collectionStatus.last_success_at || "not yet"}.
+              {collectionStatus.last_run?.status === "failed" ? ` Last error: ${collectionStatus.last_run.error_message || "collection failed"}.` : ""}
+            </p>
+          ) : null}
+          <Box title={`Saved location — ${pickedPing ? `${pickedPing.vno} at ${pickedPing.gps_time}` : historyVehicle || "select a record"}`}>
             <LiveMovingMap
               lat={currentMapData?.lat}
               lon={currentMapData?.lon}
               heading={currentMapData?.crs || 0}
               speed={currentMapData?.spd || 0}
               ignition={Boolean(currentMapData?.ign)}
-              vehicleNo={activeVehicle}
+              vehicleNo={pickedPing?.vno || historyVehicle || activeVehicle}
               time={currentMapData?.gps_time}
               historyPings={historyRows}
-              isSimulatingMotion={isSimulatingMotion}
-              onToggleMotionSimulation={() => setIsSimulatingMotion(!isSimulatingMotion)}
+              isSimulatingMotion={false}
             />
           </Box>
 
           {/* Historical Data Table */}
           <Box
-            title={`Stored GPS Tracking Records for ${activeVehicle} (${historyRows.length} entries)`}
+            title={`Stored GPS Tracking Records${historyVehicle ? ` for ${historyVehicle}` : ""} (${historyRows.length} entries)`}
             tools={(
               <button
                 type="button"
@@ -1303,7 +1626,7 @@ export default function GpsTracking() {
                       <th>Ignition</th>
                       <th>Fuel</th>
                       <th>VID</th>
-                      <th>Stored At</th>
+                      <th>Collected at</th>
                       <th style={{ textAlign: "right" }}>Map</th>
                     </tr>
                   </thead>
@@ -1311,7 +1634,9 @@ export default function GpsTracking() {
                     {historyRows.map((row, idx) => (
                       <tr
                         key={row.id || idx}
+                        onClick={() => setPickedPing(row)}
                         style={{
+                          cursor: "pointer",
                           backgroundColor: pickedPing?.id === row.id ? "rgba(32, 121, 183, 0.08)" : undefined,
                         }}
                       >
@@ -1344,7 +1669,10 @@ export default function GpsTracking() {
                           </span>
                         </td>
                         <td style={{ fontSize: 12 }}>{row.vid || "—"}</td>
-                        <td style={{ fontSize: 12, color: "var(--color-muted)" }}>{row.recorded_at}</td>
+                        <td style={{ fontSize: 12, color: "var(--color-muted)" }}>
+                          {row.recorded_at}
+                          {row.source === "auto" ? <div>Automatic</div> : null}
+                        </td>
                         <td style={{ textAlign: "right" }}>
                           <button
                             type="button"
@@ -1377,7 +1705,7 @@ export default function GpsTracking() {
             ) : (
               <div style={{ padding: "40px 20px", textAlign: "center", color: "var(--color-muted)" }}>
                 <i className="fas fa-database" style={{ fontSize: 36, opacity: 0.3, marginBottom: 12 }} />
-                <p style={{ margin: 0, fontWeight: 600 }}>No historical GPS data found for {activeVehicle}.</p>
+                <p style={{ margin: 0, fontWeight: 600 }}>No historical GPS data found{historyVehicle ? ` for ${historyVehicle}` : ""}.</p>
               </div>
             )}
           </Box>

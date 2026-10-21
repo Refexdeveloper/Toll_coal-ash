@@ -2,7 +2,7 @@ import { Router } from 'express'
 import multer from 'multer'
 import { fail, okItem, okList } from '../utils/response.js'
 import { countActivity, listActivity, logAction } from '../services/actionLog.js'
-import { exportTripChecks, tripAudit } from '../services/audit.js'
+import { closeTripIssues, exportTripChecks, tripAudit } from '../services/audit.js'
 import { can, hasPermission } from '../middleware/auth.js'
 import {
   createBatch,
@@ -12,6 +12,11 @@ import {
   exportReadsByIds,
   rejectedRowsWorkbook,
   getBatchDetail,
+  getCombinedDetail,
+  exportBatchesExcel,
+  uploadedSheetFile,
+  uploadedSheetsWorkbook,
+  parseBatchIds,
   isBatchRunning,
   listBatches,
   normalizePlate,
@@ -95,6 +100,25 @@ router.post('/audit/export', async (req, res) => {
   }
 })
 
+router.post('/audit/close', async (req, res) => {
+  try {
+    const keys = Array.isArray(req.body?.keys) ? req.body.keys.map((key: unknown) => String(key)) : []
+    const count = await closeTripIssues(keys, req.user?.id ?? null)
+    await logAction({
+      userId: req.user?.id,
+      email: req.user?.email,
+      actionType: 'update',
+      itemType: 'trip_checks',
+      itemId: 'close',
+      note: `Closed ${count} trip check issue${count === 1 ? '' : 's'}`,
+    })
+    return okItem(res, { closed: count })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Could not close the issue'
+    return fail(res, message)
+  }
+})
+
 router.get('/audit', async (req, res) => {
   try {
     const result = await tripAudit(String(req.query.vehicle || ''))
@@ -149,6 +173,51 @@ router.get('/batches', async (_req, res) => {
   return okList(res, rows)
 })
 
+router.post('/batches/combined', async (req, res) => {
+  try {
+    const ids = parseBatchIds(req.body?.ids)
+    const detail = await getCombinedDetail(ids)
+    if (!detail) return fail(res, 'Sheet not found', 404)
+    return okItem(res, detail)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Could not open the selected sheets'
+    return fail(res, message)
+  }
+})
+
+router.post('/batches/export', async (req, res) => {
+  try {
+    const ids = parseBatchIds(req.body?.ids)
+    const file = await exportBatchesExcel(ids, {
+      q: String(req.query.q || req.body?.q || ''),
+      project: String(req.query.project || req.body?.project || ''),
+      plaza: String(req.query.plaza || ''),
+      from: String(req.query.from || req.body?.from || ''),
+      to: String(req.query.to || req.body?.to || ''),
+      fromTime: String(req.query.fromTime || req.body?.fromTime || ''),
+      toTime: String(req.query.toTime || req.body?.toTime || ''),
+      vehicles: String(req.query.vehicles || ''),
+      heading: String(req.query.heading || ''),
+      allCaptured: hasPermission(req.user?.permissions, 'admin') && String(req.query.allCaptured || req.body?.allCaptured || '') === '1',
+    }, hasPermission(req.user?.permissions, 'admin'))
+    if (!file) return fail(res, 'Sheet not found', 404)
+    await logAction({
+      userId: req.user?.id,
+      email: req.user?.email,
+      actionType: 'export',
+      itemType: 'fastag_batch',
+      itemId: ids.join(','),
+      note: `Exported ${file.count} rows from ${file.sheets} sheets to ${file.filename}`,
+    })
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    res.setHeader('Content-Disposition', `attachment; filename="${file.filename}"`)
+    return res.send(file.buffer)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Export failed'
+    return fail(res, message)
+  }
+})
+
 router.get('/entered', async (req, res) => {
   try {
     const rows = await listEnteredVehicles({
@@ -174,6 +243,45 @@ router.get('/records', async (req, res) => {
   }
 })
 
+function sendFile(res: import('express').Response, file: { filename: string, buffer: Buffer, type: string }) {
+  res.setHeader('Content-Type', file.type)
+  res.setHeader('Content-Disposition', `attachment; filename="${file.filename}"`)
+  return res.send(file.buffer)
+}
+
+router.get('/batches/:id/file', async (req, res) => {
+  const file = await uploadedSheetFile(Number(req.params.id))
+  if (!file) return fail(res, 'Uploaded Excel not found', 404)
+  await logAction({
+    userId: req.user?.id,
+    email: req.user?.email,
+    actionType: 'export',
+    itemType: 'fastag_batch',
+    itemId: req.params.id,
+    note: file.rebuilt ? `Downloaded saved rows for ${file.filename}` : `Downloaded uploaded file ${file.filename}`,
+  })
+  return sendFile(res, file)
+})
+
+router.post('/batches/files', async (req, res) => {
+  try {
+    const file = await uploadedSheetsWorkbook(Array.isArray(req.body?.ids) ? req.body.ids : [])
+    if (!file) return fail(res, 'Select an uploaded Excel')
+    await logAction({
+      userId: req.user?.id,
+      email: req.user?.email,
+      actionType: 'export',
+      itemType: 'fastag_batch',
+      itemId: 'uploaded',
+      note: `Downloaded ${'count' in file ? file.count : 1} uploaded sheet${'count' in file && file.count === 1 ? '' : 's'}`,
+    })
+    return sendFile(res, file)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Could not download the uploaded Excel'
+    return fail(res, message)
+  }
+})
+
 router.get('/batches/:id/export', async (req, res) => {
   const file = await exportBatchExcel(Number(req.params.id), {
     q: String(req.query.q || ''),
@@ -185,6 +293,7 @@ router.get('/batches/:id/export', async (req, res) => {
     toTime: String(req.query.toTime || ''),
     vehicles: String(req.query.vehicles || ''),
     heading: String(req.query.heading || ''),
+    allCaptured: hasPermission(req.user?.permissions, 'admin') && String(req.query.allCaptured || '') === '1',
   }, hasPermission(req.user?.permissions, 'admin'))
   if (!file) return fail(res, 'Sheet not found', 404)
   await logAction({
@@ -224,6 +333,7 @@ router.post('/batches', upload.single('file'), async (req, res) => {
       source: 'excel',
       uploadedBy: req.user?.id ?? null,
       rows: extracted.rows,
+      file: file.buffer,
     })
     await logAction({
       userId: req.user?.id,

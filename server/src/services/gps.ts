@@ -32,6 +32,39 @@ export function parseGpsTime(t: any): string {
   return now()
 }
 
+/** Reads the live fleet from the existing GPS API. A timeout of 0 waits for the platform default. */
+export async function fetchFleetList(timeoutMs = 0): Promise<GpsPingRaw[]> {
+  const url = process.env.GPS_API_URL || GPS_API_URL
+  const token = process.env.GPS_ACCESS_TOKEN || GPS_ACCESS_TOKEN
+  const controller = timeoutMs > 0 ? new AbortController() : null
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        'X-AT-AccessToken': token,
+      },
+      signal: controller?.signal,
+    })
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '')
+      throw new Error(`GPS API error ${res.status}: ${txt || res.statusText}`)
+    }
+    const payload: any = await res.json()
+    if (Array.isArray(payload?.results)) return payload.results
+    if (Array.isArray(payload)) return payload
+    return []
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error('GPS API timed out')
+    }
+    throw error
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 /** Fetches a specific vehicle directly from the live GPS API,
  *  AND saves a new record into `gps_tracking` so it is permanently logged.
  */
@@ -41,27 +74,10 @@ export async function fetchAndSaveVehicle(targetVno: string): Promise<{
   data: any
 }> {
   const vno = targetVno.trim().toUpperCase()
-  const url = process.env.GPS_API_URL || GPS_API_URL
-  const token = process.env.GPS_ACCESS_TOKEN || GPS_ACCESS_TOKEN
 
   try {
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'Accept': 'application/json',
-        'X-AT-AccessToken': token,
-      },
-    })
-
-    if (res.ok) {
-      const payload: any = await res.json()
-      const list: GpsPingRaw[] = Array.isArray(payload.results)
-        ? payload.results
-        : Array.isArray(payload)
-          ? payload
-          : []
-
-      const match = list.find((item) => String(item.vno || '').trim().toUpperCase() === vno)
+    const list = await fetchFleetList()
+    const match = list.find((item) => String(item.vno || '').trim().toUpperCase() === vno)
       if (match && match.lat != null && match.lon != null) {
         const recordedAt = now()
         const vid = match.vid != null ? Number(match.vid) : null
@@ -83,7 +99,6 @@ export async function fetchAndSaveVehicle(targetVno: string): Promise<{
         const savedRow = await get<any>(`SELECT * FROM gps_tracking WHERE id = ?`, [insertRes.insertId])
         return { found: true, saved: true, data: savedRow }
       }
-    }
   } catch (err: any) {
     console.error(`[gps] fetchAndSaveVehicle for ${vno} error:`, err.message)
   }
@@ -109,28 +124,7 @@ export async function syncLiveFleet(): Promise<{
   vehicles: GpsPingRaw[]
 }> {
   try {
-    const url = process.env.GPS_API_URL || GPS_API_URL
-    const token = process.env.GPS_ACCESS_TOKEN || GPS_ACCESS_TOKEN
-
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'Accept': 'application/json',
-        'X-AT-AccessToken': token,
-      },
-    })
-
-    if (!res.ok) {
-      const txt = await res.text().catch(() => '')
-      throw new Error(`GPS API error ${res.status}: ${txt || res.statusText}`)
-    }
-
-    const data: any = await res.json()
-    const results: GpsPingRaw[] = Array.isArray(data.results)
-      ? data.results
-      : Array.isArray(data)
-        ? data
-        : []
+    const results = await fetchFleetList()
 
     if (!results.length) {
       return { success: true, total_vehicles: 0, inserted: 0, vehicles: [] }

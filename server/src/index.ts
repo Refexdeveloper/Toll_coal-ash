@@ -3,6 +3,7 @@ import { createApp } from './app.js'
 import { waitForDatabase } from './db/index.js'
 import { ensureAppColumns } from './db/ensure.js'
 import { alignUserRoles } from './db/seed.js'
+import { startGpsHistoryScheduler } from './services/gpsScheduler.js'
 
 dotenv.config()
 
@@ -16,6 +17,7 @@ try {
   await ensureAppColumns()
   await alignUserRoles()
   console.log('Database and Route Master tables ready')
+  startGpsHistoryScheduler()
 } catch (e) {
   console.error('Database connection failed:', e instanceof Error ? e.message : e)
   process.exit(1)

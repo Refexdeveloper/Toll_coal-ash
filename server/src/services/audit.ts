@@ -1,5 +1,14 @@
 import * as XLSX from 'xlsx'
-import { all } from '../db/index.js'
+import { all, run } from '../db/index.js'
+import { clock } from '../utils/clock.js'
+import { qualifyCrossings } from './routeQualify.js'
+
+export function skippedIssueKey(
+  trip: { vehicle_reg_no: string, challan_id?: string | null, trip_id?: string | null },
+  plaza: { seq_order?: number, toll_plaza_name?: string | null },
+) {
+  return `skipped:${trip.vehicle_reg_no}|${trip.challan_id || ''}|${trip.trip_id || ''}|${plaza.seq_order || 0}|${plaza.toll_plaza_name || ''}`
+}
 
 const GPS_MATCH_KM = 3
 const WINDOW_PAD_MS = 6 * 60 * 60 * 1000
@@ -52,6 +61,16 @@ function stamp(value: string | null | undefined) {
   if (!raw) return null
   const parsed = Date.parse(raw.includes('T') ? raw : raw.replace(' ', 'T'))
   return Number.isNaN(parsed) ? null : parsed
+}
+
+function entryWindow(reads: ReadRow[]) {
+  const timed = reads
+    .map((read) => ({ raw: String(read.reader_read_time || ''), at: stamp(read.reader_read_time) }))
+    .filter((item): item is { raw: string, at: number } => item.at != null && item.raw !== '')
+  if (!timed.length) return { first: null, last: null, firstRaw: null, lastRaw: null }
+  const earliest = timed.reduce((best, item) => (item.at < best.at ? item : best))
+  const latest = timed.reduce((best, item) => (item.at > best.at ? item : best))
+  return { first: earliest.at, last: latest.at, firstRaw: earliest.raw, lastRaw: latest.raw }
 }
 
 function plazaKey(name: string) {
@@ -223,6 +242,8 @@ export async function tripAudit(vehicleQuery = '') {
     to_location: string
     first: number | null
     last: number | null
+    firstRaw: string | null
+    lastRaw: string | null
     expected: Array<{ seq_order: number, toll_plaza_name: string, geocode: string | null, recorded: boolean }>
     basis: 'route_master' | 'excel'
     missing: Array<{ seq_order: number, toll_plaza_name: string, geocode: string | null, kind: 'missed' | 'crossed' | 'outside' }>
@@ -256,7 +277,7 @@ export async function tripAudit(vehicleQuery = '') {
           break
         }
       }
-      const times = actual.map((read) => stamp(read.reader_read_time)).filter((value): value is number => value != null)
+      const window = entryWindow(actual)
       if (!matchedRoute) {
         const fromPoint = parseGeocode(tripFrom)
         const toPoint = parseGeocode(tripTo)
@@ -314,8 +335,10 @@ export async function tripAudit(vehicleQuery = '') {
           route_name: 'Excel sites',
           from_location: tripFrom,
           to_location: tripTo,
-          first: times.length ? Math.min(...times) : null,
-          last: times.length ? Math.max(...times) : null,
+          first: window.first,
+          last: window.last,
+          firstRaw: window.firstRaw,
+          lastRaw: window.lastRaw,
           basis: 'excel',
           expected: [],
           missing,
@@ -325,11 +348,25 @@ export async function tripAudit(vehicleQuery = '') {
       const ordered = reversed
         ? matchedRoute.map((row, index) => ({ ...row, seq_order: index + 1 }))
         : matchedRoute
+      const qualified = qualifyCrossings(actual.map((read) => ({
+        id: `${read.vehicle_id}:${read.toll_plaza_name}:${read.reader_read_time}`,
+        vehicle_reg_no: read.vehicle_reg_no,
+        toll_plaza_name: read.toll_plaza_name,
+        toll_plaza_geocode: read.toll_plaza_geocode,
+        reader_read_time: read.reader_read_time,
+      })), {
+        route_id: ordered[0].route_id,
+        tolls: ordered.map((row, index) => ({
+          seq_order: reversed ? index + 1 : row.seq_order,
+          toll_plaza_name: row.toll_plaza_name,
+          toll_plaza_geocode: row.toll_plaza_geocode,
+        })),
+      }, { requireDirection: false })
       const expected = ordered.map((row) => ({
         seq_order: row.seq_order,
         toll_plaza_name: row.toll_plaza_name,
         geocode: row.toll_plaza_geocode,
-        recorded: actualNames.some((name) => plazasMatch(row.toll_plaza_name, name)),
+        recorded: qualified.some((item) => item.route_match === 'qualifying' && plazasMatch(row.toll_plaza_name, item.toll_plaza_name || '')),
       }))
       const missing = expected.filter((row) => !row.recorded).map((row) => ({ ...row, kind: 'missed' as const }))
       if (!missing.length) continue
@@ -342,8 +379,10 @@ export async function tripAudit(vehicleQuery = '') {
         route_name: ordered[0].route_name,
         from_location: tripFrom,
         to_location: tripTo,
-        first: times.length ? Math.min(...times) : null,
-        last: times.length ? Math.max(...times) : null,
+        first: window.first,
+        last: window.last,
+        firstRaw: window.firstRaw,
+        lastRaw: window.lastRaw,
         basis: 'route_master',
         expected,
         missing,
@@ -360,18 +399,33 @@ export async function tripAudit(vehicleQuery = '') {
       }
     }
     if (!best || best.matched < 2) continue
+    const qualified = qualifyCrossings(actual.map((read) => ({
+      id: `${read.vehicle_id}:${read.toll_plaza_name}:${read.reader_read_time}`,
+      vehicle_reg_no: read.vehicle_reg_no,
+      toll_plaza_name: read.toll_plaza_name,
+      toll_plaza_geocode: read.toll_plaza_geocode,
+      reader_read_time: read.reader_read_time,
+    })), {
+      route_id: best.rows[0].route_id,
+      tolls: best.rows.map((row) => ({
+        seq_order: row.seq_order,
+        toll_plaza_name: row.toll_plaza_name,
+        toll_plaza_geocode: row.toll_plaza_geocode,
+      })),
+    }, { requireDirection: false })
     const expected = best.rows.map((row) => ({
       seq_order: row.seq_order,
       toll_plaza_name: row.toll_plaza_name,
       geocode: row.toll_plaza_geocode,
-      recorded: actualNames.some((name) => plazasMatch(row.toll_plaza_name, name)),
+      recorded: qualified.some((item) => item.route_match === 'qualifying' && plazasMatch(row.toll_plaza_name, item.toll_plaza_name || '')),
     }))
     const recordedSeq = expected.filter((row) => row.recorded).map((row) => row.seq_order)
+    if (!recordedSeq.length) continue
     const firstSeq = Math.min(...recordedSeq)
     const lastSeq = Math.max(...recordedSeq)
     const missing = expected.filter((row) => !row.recorded && row.seq_order > firstSeq && row.seq_order < lastSeq).map((row) => ({ ...row, kind: 'missed' as const }))
     if (!missing.length) continue
-    const times = actual.map((read) => stamp(read.reader_read_time)).filter((value): value is number => value != null)
+    const window = entryWindow(actual)
     skippedCandidates.push({
       vehicle_reg_no: trip.vehicle_reg_no,
       project_name: clean(trip.project_name),
@@ -382,8 +436,10 @@ export async function tripAudit(vehicleQuery = '') {
       from_location: best.rows[0].from_location,
       to_location: best.rows[0].to_location,
       basis: 'route_master',
-      first: times.length ? Math.min(...times) : null,
-      last: times.length ? Math.max(...times) : null,
+      first: window.first,
+      last: window.last,
+      firstRaw: window.firstRaw,
+      lastRaw: window.lastRaw,
       expected,
       missing,
     })
@@ -453,6 +509,8 @@ export async function tripAudit(vehicleQuery = '') {
       route_name: trip.route_name,
       basis: trip.basis,
       route_label: `${trip.from_location} to ${trip.to_location}`,
+      first_entry: trip.firstRaw,
+      last_entry: trip.lastRaw,
       expected_count: trip.expected.length,
       recorded_count: trip.expected.filter((row) => row.recorded).length,
       skipped: skippedPlazas,
@@ -460,17 +518,46 @@ export async function tripAudit(vehicleQuery = '') {
     }
   })
 
+  let closedKeys = new Set<string>()
+  try {
+    const closed = await all<{ issue_key: string }>(`SELECT issue_key FROM trip_issue_closures`)
+    closedKeys = new Set(closed.map((row) => row.issue_key))
+  } catch {
+    closedKeys = new Set()
+  }
+  const openSkipped = skipped
+    .map((trip) => ({
+      ...trip,
+      skipped: trip.skipped.filter((plaza) => !closedKeys.has(skippedIssueKey(trip, plaza))),
+    }))
+    .filter((trip) => trip.skipped.length)
+
   return {
     overlaps,
-    skipped,
+    skipped: openSkipped,
     summary: {
       multi_project_vehicles: overlaps.length,
       overlap_trips: overlaps.reduce((sum, item) => sum + item.trips.length, 0),
-      skipped_trips: skipped.length,
-      skipped_plazas: skipped.reduce((sum, item) => sum + item.skipped.length, 0),
-      gps_confirmed: skipped.reduce((sum, item) => sum + item.skipped.filter((plaza) => plaza.gps_passed).length, 0),
+      skipped_trips: openSkipped.length,
+      skipped_plazas: openSkipped.reduce((sum, item) => sum + item.skipped.length, 0),
+      gps_confirmed: openSkipped.reduce((sum, item) => sum + item.skipped.filter((plaza) => plaza.gps_passed).length, 0),
     },
   }
+}
+
+export async function closeTripIssues(keys: string[], userId: number | null) {
+  const unique = [...new Set(keys.map((key) => String(key || '').trim()).filter((key) => key.startsWith('skipped:')))]
+  if (!unique.length) throw new Error('Select an open issue to close')
+  const ts = clock()
+  for (const key of unique) {
+    await run(
+      `INSERT INTO trip_issue_closures (issue_key, closed_by, closed_at)
+       VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE closed_by = VALUES(closed_by), closed_at = VALUES(closed_at)`,
+      [key.slice(0, 500), userId, ts],
+    )
+  }
+  return unique.length
 }
 
 function exportStamp() {
@@ -531,6 +618,7 @@ export async function exportTripChecks(vehicleQuery = '', focus = '', keys: stri
       'Trip ID': trip.trip_id || '',
       From: trip.from_location || '',
       To: trip.to_location || '',
+      Date: trip.first_entry ? (trip.last_entry && trip.last_entry !== trip.first_entry ? `${trip.first_entry} to ${trip.last_entry}` : trip.first_entry) : '',
       Check: trip.basis === 'excel' ? 'Excel sites' : 'Route master',
       Route: trip.route_name || '',
       'Route label': trip.route_label || '',
@@ -545,7 +633,7 @@ export async function exportTripChecks(vehicleQuery = '', focus = '', keys: stri
     if (!picked.size || rows.length) {
     count += rows.length
     const sheet = XLSX.utils.json_to_sheet(rows.length ? rows : [{
-      Vehicle: '', Project: '', 'Challan ID': '', 'Trip ID': '', From: '', To: '', Check: '', Route: '', 'Route label': '', Recorded: '', 'Skipped plaza': '', GPS: '', Action: '',
+      Vehicle: '', Project: '', 'Challan ID': '', 'Trip ID': '', From: '', To: '', Date: '', Check: '', Route: '', 'Route label': '', Recorded: '', 'Skipped plaza': '', GPS: '', Action: '',
     }])
     XLSX.utils.book_append_sheet(book, sheet, 'Skipped tolls')
     }

@@ -2,6 +2,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useEffect, useState } from "react";
 // import { Activity } from "lucide-react";
 import { api, authApi } from "../api.js";
+import { useAuth } from "../api/AuthContext.jsx";
 import { Box, Field } from "../components/ui.jsx";
 import "../components/login/login-suite.css";
 
@@ -182,25 +183,30 @@ export function AccountProfile() {
   );
 }
 
+function leavePasswordPage(raw) {
+  if (!raw || !raw.startsWith("/") || raw.startsWith("//") || raw.startsWith("/account/password")) return "/routes";
+  return raw;
+}
+
 export function AccountPassword() {
+  const navigate = useNavigate();
+  const [params] = useSearchParams();
+  const { refreshUser } = useAuth();
   const [form, setForm] = useState({ current_password: "", password: "", password_confirmation: "" });
-  const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
   async function save(e) {
     e.preventDefault();
     setErr("");
-    setMsg("");
     try {
       await api.changePassword(form);
-      setMsg("Password updated");
-      setForm({ current_password: "", password: "", password_confirmation: "" });
+      await refreshUser();
+      navigate(leavePasswordPage(params.get("next")), { replace: true });
     } catch (e2) {
       setErr(e2 instanceof Error ? e2.message : "Failed");
     }
   }
   return (
     <Box title="Change password" type="primary">
-      {msg ? <p className="text-success">{msg}</p> : null}
       {err ? <p className="text-danger">{err}</p> : null}
       <form onSubmit={save}>
         <Field label="Current password"><input type="password" className="form-control" value={form.current_password} onChange={(e) => setForm({ ...form, current_password: e.target.value })} /></Field>

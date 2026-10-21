@@ -35,6 +35,12 @@ export async function ensureAppColumns() {
   if (!(await columnExists('fastag_vehicles', 'to_location'))) {
     await run(`ALTER TABLE fastag_vehicles ADD COLUMN to_location VARCHAR(191) NULL AFTER from_location`)
   }
+  if (!(await columnExists('fastag_vehicles', 'loaded_at'))) {
+    await run(`ALTER TABLE fastag_vehicles ADD COLUMN loaded_at DATETIME NULL AFTER to_location`)
+  }
+  if (!(await columnExists('fastag_batches', 'source_file'))) {
+    await run(`ALTER TABLE fastag_batches ADD COLUMN source_file LONGBLOB NULL AFTER filename`)
+  }
   if (!(await columnExists('fastag_reads', 'project_name'))) {
     await run(`ALTER TABLE fastag_reads ADD COLUMN project_name VARCHAR(191) NULL AFTER vehicle_reg_no`)
   }
@@ -146,6 +152,17 @@ export async function ensureAppColumns() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `)
 
+  await run(`
+    CREATE TABLE IF NOT EXISTS trip_issue_closures (
+      id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+      issue_key VARCHAR(500) NOT NULL,
+      closed_by INT UNSIGNED NULL,
+      closed_at DATETIME NOT NULL,
+      PRIMARY KEY (id),
+      UNIQUE KEY uk_trip_issue_key (issue_key)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `)
+
   // Ensure GPS Tracking table exists
   await run(`
     CREATE TABLE IF NOT EXISTS gps_tracking (
@@ -167,6 +184,46 @@ export async function ensureAppColumns() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `)
 
+  if (!(await columnExists('gps_tracking', 'source'))) {
+    await run(`ALTER TABLE gps_tracking ADD COLUMN source VARCHAR(16) NOT NULL DEFAULT 'manual' AFTER recorded_at`)
+  }
+  if (!(await columnExists('gps_tracking', 'auto_key'))) {
+    await run(`ALTER TABLE gps_tracking ADD COLUMN auto_key VARCHAR(96) NULL AFTER source`)
+  }
+  if (!(await indexExists('gps_tracking', 'uk_gps_auto_key'))) {
+    await run(`ALTER TABLE gps_tracking ADD UNIQUE KEY uk_gps_auto_key (auto_key)`)
+  }
+  await run(`
+    CREATE TABLE IF NOT EXISTS gps_collection_runs (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      started_at DATETIME NOT NULL,
+      finished_at DATETIME NULL,
+      status VARCHAR(16) NOT NULL,
+      vehicles_seen INT NOT NULL DEFAULT 0,
+      moving INT NOT NULL DEFAULT 0,
+      inserted INT NOT NULL DEFAULT 0,
+      skipped_dup INT NOT NULL DEFAULT 0,
+      error_message VARCHAR(500) NULL,
+      PRIMARY KEY (id),
+      KEY idx_gps_collection_started (started_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `)
+  await run(`
+    CREATE TABLE IF NOT EXISTS gps_collection_settings (
+      id TINYINT UNSIGNED NOT NULL DEFAULT 1,
+      enabled TINYINT(1) NOT NULL DEFAULT 1,
+      interval_minutes INT UNSIGNED NOT NULL DEFAULT 120,
+      speed_threshold DECIMAL(6, 2) NOT NULL DEFAULT 1.00,
+      updated_at DATETIME NULL,
+      updated_by INT UNSIGNED NULL,
+      PRIMARY KEY (id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `)
+  await run(`
+    INSERT INTO gps_collection_settings (id, enabled, interval_minutes, speed_threshold, updated_at)
+    VALUES (1, 1, 120, 1.00, ?)
+    ON DUPLICATE KEY UPDATE id = id
+  `, [now()])
 
   // Seed sample GPS tracking data if empty
   const countGps = await get<{ c: number }>(`SELECT COUNT(*) as c FROM gps_tracking`)

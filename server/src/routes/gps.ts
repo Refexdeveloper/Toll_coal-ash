@@ -6,6 +6,8 @@ import { can } from '../middleware/auth.js'
 import { logAction } from '../services/actionLog.js'
 import { clock } from '../utils/clock.js'
 import { syncLiveFleet, fetchAndSaveVehicle, parseGpsTime } from '../services/gps.js'
+import { collectionStatus } from '../services/gpsScheduler.js'
+import { routeWindow, summarizeRoute, validCoordinate } from '../services/gpsRoute.js'
 
 const router = Router()
 router.use(can('gps'))
@@ -190,26 +192,152 @@ router.get('/live', async (req, res) => {
   }
 })
 
+function dayParam(value: unknown) {
+  const text = String(value || '').trim()
+  if (!text) return ''
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null
+  return text
+}
+
+function clockParam(value: unknown) {
+  const text = String(value || '').trim()
+  if (!text) return ''
+  if (!/^\d{2}:\d{2}(:\d{2})?$/.test(text)) return null
+  return text.length === 5 ? text : text.slice(0, 8)
+}
+
+/** GET /api/v1/gps/collection-status
+ *  Read-only status for the automatic history job. Settings are changed by an administrator.
+ */
+router.get('/collection-status', async (_req, res) => {
+  try {
+    const status = await collectionStatus()
+    return okItem(res, {
+      enabled: status.enabled,
+      interval_minutes: status.interval_minutes,
+      last_success_at: status.last_success_at,
+      last_run: status.last_run,
+    })
+  } catch (e: any) {
+    return fail(res, e.message || 'Server error', 500)
+  }
+})
+
+/** GET /api/v1/gps/route?vno=CG04NU2465&date=2026-10-15&fromTime=08:00&toTime=18:00
+ *  Stored points for one vehicle and day, oldest GPS time first.
+ */
+router.get('/route', async (req, res) => {
+  try {
+    const vno = String(req.query.vno || '').toUpperCase().replace(/[^A-Z0-9]/g, '')
+    if (vno.length < 4 || vno.length > 30) return fail(res, 'Enter a vehicle number', 400)
+    const fromDate = dayParam(req.query.from || req.query.date)
+    const toDate = dayParam(req.query.to)
+    const fromTime = clockParam(req.query.fromTime)
+    const toTime = clockParam(req.query.toTime)
+    if (fromDate == null || toDate == null || fromTime == null || toTime == null) {
+      return fail(res, 'Enter dates as YYYY-MM-DD and times as HH:MM', 400)
+    }
+    const startDay = fromDate || toDate
+    const endDay = toDate || fromDate
+    if (!startDay) return fail(res, 'Enter a from date and a to date', 400)
+    let window
+    try {
+      window = routeWindow(startDay, endDay, fromTime, toTime)
+    } catch (error) {
+      return fail(res, error instanceof Error ? error.message : 'Enter a valid time range', 400)
+    }
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit || '2000'), 10) || 2000, 1), 5000)
+    const offset = Math.max(parseInt(String(req.query.offset || '0'), 10) || 0, 0)
+    const bounds = [vno, window.start, window.end]
+    const totalRow = await get<{ total: number }>(
+      `SELECT COUNT(*) AS total
+       FROM gps_tracking
+       WHERE vno = ? AND gps_time >= ? AND gps_time <= ?
+         AND lat BETWEEN -90 AND 90 AND lon BETWEEN -180 AND 180`,
+      bounds,
+    )
+    const rows = await all<{
+      id: number
+      vid: number | null
+      vno: string
+      lat: number
+      lon: number
+      spd: number
+      crs: number
+      ign: number
+      fuel: string
+      gps_time: string
+      recorded_at: string
+    }>(
+      `SELECT id, vid, vno, lat, lon, spd, crs, ign, fuel, gps_time, recorded_at
+       FROM gps_tracking
+       WHERE vno = ? AND gps_time >= ? AND gps_time <= ?
+         AND lat BETWEEN -90 AND 90 AND lon BETWEEN -180 AND 180
+       ORDER BY gps_time ASC, id ASC
+       LIMIT ? OFFSET ?`,
+      [...bounds, limit, offset],
+    )
+    const points = rows
+      .map((row) => ({
+        ...row,
+        lat: Number(row.lat),
+        lon: Number(row.lon),
+        spd: Number(row.spd),
+        crs: Number(row.crs),
+        ign: Number(row.ign) ? 1 : 0,
+      }))
+      .filter((row) => validCoordinate(row.lat, row.lon))
+    const total = Number(totalRow?.total || 0)
+    return okItem(res, {
+      vno,
+      from_date: startDay,
+      to_date: endDay,
+      from: window.start,
+      to: window.end,
+      total,
+      limit,
+      offset,
+      truncated: offset + points.length < total,
+      summary: summarizeRoute(points),
+      points,
+    })
+  } catch (e: any) {
+    return fail(res, e.message || 'Server error', 500)
+  }
+})
+
 /** GET /api/v1/gps/history?vno=CG04NU2465&from=2026-09-01&to=2026-09-30&limit=500
- *  Returns historical pings for a vehicle in a date range.
+ *  Returns historical pings. Vehicle and dates are optional filters.
  */
 router.get('/history', async (req, res) => {
   try {
     const vno = String(req.query.vno || '').toUpperCase().trim()
-    if (!vno) return fail(res, 'vno is required', 400)
-
-    const from = String(req.query.from || '').trim()
-    const to   = String(req.query.to   || '').trim()
+    const from = dayParam(req.query.from)
+    const to = dayParam(req.query.to)
+    const fromTime = clockParam(req.query.fromTime)
+    const toTime = clockParam(req.query.toTime)
+    if (from == null || to == null || fromTime == null || toTime == null) {
+      return fail(res, 'Enter dates as YYYY-MM-DD and times as HH:MM', 400)
+    }
     const limit = Math.min(parseInt(String(req.query.limit || '500'), 10) || 500, 2000)
 
-    const params: any[] = [vno]
-    let whereSql = 'WHERE vno = ?'
-
-    if (from) {
+    const params: any[] = []
+    let whereSql = 'WHERE 1 = 1'
+    if (vno) {
+      whereSql += ' AND vno = ?'
+      params.push(vno)
+    }
+    if (from && fromTime) {
+      whereSql += ' AND gps_time >= ?'
+      params.push(`${from} ${fromTime.length === 5 ? `${fromTime}:00` : fromTime}`)
+    } else if (from) {
       whereSql += ' AND gps_time >= ?'
       params.push(from)
     }
-    if (to) {
+    if (to && toTime) {
+      whereSql += ' AND gps_time <= ?'
+      params.push(`${to} ${toTime.length === 5 ? `${toTime}:59` : toTime}`)
+    } else if (to) {
       whereSql += ' AND gps_time < DATE_ADD(?, INTERVAL 1 DAY)'
       params.push(to)
     }
@@ -235,16 +363,21 @@ router.get('/history', async (req, res) => {
 router.get('/vehicles', async (_req, res) => {
   try {
     const rows = await all<{ vno: string; last_seen: string; last_lat: number; last_lon: number; last_spd: number; last_ign: number; last_fuel: string }>(
-      `SELECT vno,
-              MAX(gps_time) AS last_seen,
-              CAST(SUBSTRING_INDEX(GROUP_CONCAT(lat  ORDER BY id DESC), ',', 1) AS DECIMAL(11,8)) AS last_lat,
-              CAST(SUBSTRING_INDEX(GROUP_CONCAT(lon  ORDER BY id DESC), ',', 1) AS DECIMAL(11,8)) AS last_lon,
-              CAST(SUBSTRING_INDEX(GROUP_CONCAT(spd  ORDER BY id DESC), ',', 1) AS DECIMAL(6,2))  AS last_spd,
-              CAST(SUBSTRING_INDEX(GROUP_CONCAT(ign  ORDER BY id DESC), ',', 1) AS UNSIGNED)      AS last_ign,
-              SUBSTRING_INDEX(GROUP_CONCAT(fuel ORDER BY id DESC), ',', 1)                         AS last_fuel
-       FROM gps_tracking
-       GROUP BY vno
-       ORDER BY vno ASC
+      `SELECT g.vno,
+              g.gps_time AS last_seen,
+              g.lat AS last_lat,
+              g.lon AS last_lon,
+              g.spd AS last_spd,
+              g.ign AS last_ign,
+              g.fuel AS last_fuel
+       FROM gps_tracking g
+       INNER JOIN (
+         SELECT MAX(id) AS id
+         FROM gps_tracking
+         WHERE vno IS NOT NULL AND vno <> ''
+         GROUP BY vno
+       ) latest ON latest.id = g.id
+       ORDER BY g.vno ASC
        LIMIT 500`,
     )
     return okItem(res, { count: rows.length, vehicles: rows })
