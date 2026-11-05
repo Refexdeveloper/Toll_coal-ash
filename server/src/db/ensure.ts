@@ -38,6 +38,9 @@ export async function ensureAppColumns() {
   if (!(await columnExists('fastag_vehicles', 'loaded_at'))) {
     await run(`ALTER TABLE fastag_vehicles ADD COLUMN loaded_at DATETIME NULL AFTER to_location`)
   }
+  if (!(await columnExists('fastag_vehicles', 'planned_tolls'))) {
+    await run(`ALTER TABLE fastag_vehicles ADD COLUMN planned_tolls TEXT NULL AFTER loaded_at`)
+  }
   if (!(await columnExists('fastag_batches', 'source_file'))) {
     await run(`ALTER TABLE fastag_batches ADD COLUMN source_file LONGBLOB NULL AFTER filename`)
   }

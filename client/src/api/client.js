@@ -177,6 +177,7 @@ export const api = {
   fastagExport: (id, query = "") => request("/fastag/batches/" + encodeURIComponent(id) + "/export" + (query ? `?${query}` : ""), { download: true }),
   fastagCombined: (ids) => request("/fastag/batches/combined", { method: "POST", json: { ids } }),
   fastagCombinedExport: (ids, query = "") => request("/fastag/batches/export" + (query ? `?${query}` : ""), { method: "POST", json: { ids }, download: true }),
+  fastagNotCompletedExport: (ids) => request("/fastag/batches/not-completed", { method: "POST", json: { ids }, download: true }),
   fastagUploadedFile: (id) => request("/fastag/batches/" + encodeURIComponent(id) + "/file", { download: true }),
   fastagUploadedFiles: (ids) => request("/fastag/batches/files", { method: "POST", json: { ids }, download: true }),
   fastagSelectedExport: (ids) => request("/fastag/reads/export", { method: "POST", json: { ids }, download: true }),

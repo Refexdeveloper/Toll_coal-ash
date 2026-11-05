@@ -11,6 +11,8 @@ import {
   exportBatchExcel,
   exportReadsByIds,
   rejectedRowsWorkbook,
+  notCompletedTripsWorkbook,
+  dropSavedDuplicates,
   getBatchDetail,
   getCombinedDetail,
   exportBatchesExcel,
@@ -143,15 +145,17 @@ router.post('/preview', upload.single('file'), async (req, res) => {
   if (!/\.(xlsx|xls|csv)$/i.test(name)) return fail(res, 'Upload an .xlsx, .xls, or .csv file')
   try {
     const extracted = extractSheetRows(file.buffer)
+    const fresh = await dropSavedDuplicates(extracted.rows)
+    const duplicates = [...extracted.duplicates, ...fresh.duplicates]
     return okItem(res, {
       filename: name,
       total_rows: extracted.totalRows,
-      valid_rows: extracted.rows.length,
+      valid_rows: fresh.rows.length,
       invalid_rows: extracted.errors.length,
-      duplicate_rows: extracted.duplicates.length,
-      rows: extracted.rows.slice(0, 25),
+      duplicate_rows: duplicates.length,
+      rows: fresh.rows.slice(0, 25),
       errors: extracted.errors,
-      duplicates: extracted.duplicates,
+      duplicates,
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Could not read the sheet'
@@ -191,6 +195,8 @@ router.post('/batches/export', async (req, res) => {
     const file = await exportBatchesExcel(ids, {
       q: String(req.query.q || req.body?.q || ''),
       project: String(req.query.project || req.body?.project || ''),
+      projectText: String(req.query.projectText || req.body?.projectText || ''),
+      challan: String(req.query.challan || req.body?.challan || ''),
       plaza: String(req.query.plaza || ''),
       from: String(req.query.from || req.body?.from || ''),
       to: String(req.query.to || req.body?.to || ''),
@@ -214,6 +220,27 @@ router.post('/batches/export', async (req, res) => {
     return res.send(file.buffer)
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Export failed'
+    return fail(res, message)
+  }
+})
+
+router.post('/batches/not-completed', async (req, res) => {
+  try {
+    const ids = parseBatchIds(req.body?.ids)
+    const file = await notCompletedTripsWorkbook(ids)
+    await logAction({
+      userId: req.user?.id,
+      email: req.user?.email,
+      actionType: 'export',
+      itemType: 'fastag_batch',
+      itemId: ids.join(','),
+      note: `Exported ${file.count} not completed trips to ${file.filename}`,
+    })
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    res.setHeader('Content-Disposition', `attachment; filename="${file.filename}"`)
+    return res.send(file.buffer)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Could not download not completed trips'
     return fail(res, message)
   }
 })
@@ -286,6 +313,8 @@ router.get('/batches/:id/export', async (req, res) => {
   const file = await exportBatchExcel(Number(req.params.id), {
     q: String(req.query.q || ''),
     project: String(req.query.project || ''),
+    projectText: String(req.query.projectText || ''),
+    challan: String(req.query.challan || ''),
     plaza: String(req.query.plaza || ''),
     from: String(req.query.from || ''),
     to: String(req.query.to || ''),
@@ -324,7 +353,9 @@ router.post('/batches', upload.single('file'), async (req, res) => {
   }
   try {
     const extracted = extractSheetRows(file.buffer)
-    if (!extracted.rows.length) {
+    const fresh = await dropSavedDuplicates(extracted.rows)
+    if (!fresh.rows.length) {
+      if (fresh.duplicates.length) return fail(res, fresh.duplicates.map((item) => item.message))
       if (extracted.errors.length) return fail(res, extracted.errors.map((item) => item.message))
       return fail(res, 'No vehicle numbers found. Each row needs a vehicle number and a challan ID.')
     }
@@ -332,18 +363,21 @@ router.post('/batches', upload.single('file'), async (req, res) => {
       filename: name,
       source: 'excel',
       uploadedBy: req.user?.id ?? null,
-      rows: extracted.rows,
+      rows: fresh.rows,
       file: file.buffer,
     })
+    const canFetch = Boolean(String(process.env.FASTAG_ACCESS_TOKEN || '').trim())
+    if (canFetch) await queueBatch(detail.batch.id, actorOf(req))
+    const loaded = await getBatchDetail(detail.batch.id)
     await logAction({
       userId: req.user?.id,
       email: req.user?.email,
       actionType: 'upload',
       itemType: 'fastag_batch',
       itemId: detail.batch.id,
-      note: `Uploaded ${name} with ${detail.batch.vehicle_count} vehicles. Skipped ${extracted.errors.length} rows.`,
+      note: `Uploaded ${name} with ${detail.batch.vehicle_count} vehicles. Skipped ${extracted.errors.length + fresh.duplicates.length} rows.`,
     })
-    return okItem(res, { ...detail, rejected: extracted.errors }, 201)
+    return okItem(res, { ...(loaded || detail), rejected: [...extracted.errors, ...fresh.duplicates] }, 201)
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Could not read the sheet'
     return fail(res, message)

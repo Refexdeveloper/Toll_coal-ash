@@ -1547,6 +1547,17 @@
   z-index: 1;
   background: #f8fafc;
 }
+.ft-fetch-note {
+  max-width: 320px;
+  white-space: normal;
+  color: #b91c1c;
+  font-size: 12px;
+  line-height: 1.35;
+}
+.ft-passed { display: flex; flex-direction: column; gap: 8px; min-width: 180px; white-space: normal; }
+.ft-passed div { display: flex; flex-direction: column; gap: 1px; }
+.ft-passed strong { color: #0f172a; }
+.ft-passed span { color: #64748b; font-size: 12px; }
 .ft-map-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 280px;

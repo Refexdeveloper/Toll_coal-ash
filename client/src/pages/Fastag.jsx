@@ -47,6 +47,68 @@ function clockBound(time, end) {
   return `${hour.padStart(2, "0")}:${minute.padStart(2, "0")}:${second.padStart(2, "0")}`;
 }
 
+function quarterBounds(year, quarter) {
+  const y = Number(year);
+  const spans = {
+    Q1: ["01-01", "03-31"],
+    Q2: ["04-01", "06-30"],
+    Q3: ["07-01", "09-30"],
+    Q4: ["10-01", "12-31"],
+  };
+  const span = spans[quarter];
+  if (!y || !span) return null;
+  return [`${y}-${span[0]}`, `${y}-${span[1]}`];
+}
+
+function isDuplicateData(message) {
+  return /duplicate data/i.test(String(message || ""));
+}
+
+function isNestedApiFailure(message) {
+  return /nested response failed/i.test(String(message || ""));
+}
+
+function plannedTollSlots(row) {
+  const raw = row?.planned_tolls;
+  let list = [];
+  if (Array.isArray(raw)) list = raw;
+  else if (typeof raw === "string" && raw.trim()) {
+    try { list = JSON.parse(raw); } catch { list = []; }
+  }
+  return list.map((item) => ({
+    name: String(item?.name || "").trim(),
+    geocode: String(item?.geocode || "").trim(),
+    at: String(item?.at || "").trim(),
+  })).filter((item) => item.name || item.geocode || item.at);
+}
+
+function passedTollLines(vehicle, tollReads) {
+  const mine = (tollReads || [])
+    .filter((item) => Number(item.vehicle_id) === Number(vehicle.id))
+    .sort((a, b) => entryStamp(a) - entryStamp(b));
+  if (mine.length) {
+    return mine.map((item) => ({
+      key: item.id,
+      name: item.toll_plaza_name || "Toll",
+      time: item.reader_read_time || "—",
+      geocode: item.toll_plaza_geocode || "—",
+    }));
+  }
+  return plannedTollSlots(vehicle).map((slot, index) => ({
+    key: `${slot.name}-${index}`,
+    name: slot.name || "Toll",
+    time: slot.at || "—",
+    geocode: slot.geocode || "—",
+  }));
+}
+
+function tripFetchNote(row, admin) {
+  if (row.status === "ok") return "";
+  const message = row.error_message || "Not fetched";
+  if (!admin && isNestedApiFailure(message)) return "Fetch failed";
+  return message;
+}
+
 function splitSite(value) {
   const text = String(value || "").trim();
   const match = text.match(/(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/);
@@ -108,6 +170,7 @@ export default function Fastag() {
   const [routes, setRoutes] = useState([]);
   const [storedRows, setStoredRows] = useState(null);
   const [file, setFile] = useState(null);
+  const [fileInputKey, setFileInputKey] = useState(0);
   const [uploadErrors, setUploadErrors] = useState([]);
   const [preview, setPreview] = useState(null);
   const [filter, setFilter] = useState("");
@@ -115,6 +178,10 @@ export default function Fastag() {
   const [showAllCaptured, setShowAllCaptured] = useState(false);
   const [showFetched, setShowFetched] = useState(false);
   const [tollQuery, setTollQuery] = useState("");
+  const [tollProject, setTollProject] = useState("");
+  const [tollChallan, setTollChallan] = useState("");
+  const [quarterYear, setQuarterYear] = useState("");
+  const [quarter, setQuarter] = useState("");
   const [page, setPage] = useState(1);
   const [vehiclePage, setVehiclePage] = useState(1);
   const [selectedRead, setSelectedRead] = useState(null);
@@ -262,6 +329,13 @@ export default function Fastag() {
     return () => window.clearInterval(timer);
   }, [batch?.id, batch?.status, sheetIds]);
 
+  function clearVehicleSheet() {
+    setFile(null);
+    setPreview(null);
+    setUploadErrors([]);
+    setFileInputKey((current) => current + 1);
+  }
+
   async function previewSheet(event) {
     event.preventDefault();
     if (!file) {
@@ -274,7 +348,12 @@ export default function Fastag() {
       const problems = [...(data.errors || []), ...(data.duplicates || [])];
       setPreview(data);
       setUploadErrors(problems.map((item) => item.message));
-      if (problems.length) {
+      const repeated = (data.duplicates || []).filter((item) => isDuplicateData(item.message)).length;
+      if (repeated && !data.valid_rows) {
+        toast.error("Duplicate data. These challans are already uploaded for this project and date.");
+      } else if (repeated) {
+        toast.flag(`Duplicate data. ${repeated} row${repeated === 1 ? " is" : "s are"} already uploaded and will not be fetched again.`);
+      } else if (problems.length) {
         toast.flag(`Trip sheet flagged. ${problems.length} row${problems.length === 1 ? "" : "s"} need attention.`);
       }
     } catch (error) {
@@ -301,13 +380,17 @@ export default function Fastag() {
       setUploadErrors(rejected.map((item) => item.message));
       setPreview(null);
       setFile(null);
+      setFileInputKey((current) => current + 1);
       await loadList();
       if (can("activity")) await loadActivity();
       toast.success(`${data.batch.vehicle_count} vehicle${data.batch.vehicle_count === 1 ? "" : "s"} imported`);
+      if (data.batch.status === "running") toast.info("Fetching toll data");
       if (rejected.length) toast.flag(`Trip sheet flagged. ${rejected.length} row${rejected.length === 1 ? "" : "s"} were not imported.`);
     } catch (error) {
-      setUploadErrors(error.messages || [error.message]);
-      toast.error(error.messages?.length > 1 ? `${error.messages.length} rows were not imported` : error.message);
+      const messages = error.messages || [error.message];
+      setUploadErrors(messages);
+      if (messages.every((message) => isDuplicateData(message))) toast.error("Duplicate data. These challans are already uploaded for this project and date.");
+      else toast.error(messages.length > 1 ? `${messages.length} rows were not imported` : error.message);
     } finally {
       setBusy("");
     }
@@ -462,7 +545,7 @@ export default function Fastag() {
       setStoredRows(stored.rows || []);
       setPage(1);
       const vehicle = data.vehicles?.[0];
-      if (vehicle?.status === "error") toast.error(vehicle.error_message || "Lookup failed");
+      if (vehicle?.status === "error") toast.error(tripFetchNote(vehicle, isAdmin) || "Lookup failed");
       else if (vehicle?.status === "empty") toast.info("No toll reads returned");
       else toast.success(`Stored ${data.batch.read_count} toll read${data.batch.read_count === 1 ? "" : "s"}`);
     } catch (error) {
@@ -534,6 +617,8 @@ export default function Fastag() {
     () => sourceReads.filter((row) => {
       if (!seeAllCaptured && row.route_match && !["qualifying", "unverified", "ambiguous"].includes(row.route_match)) return false;
       if (tollQuery.trim() && !(row.toll_plaza_name || "").toLowerCase().includes(tollQuery.trim().toLowerCase())) return false;
+      if (tollProject.trim() && !(row.project_name || "").toLowerCase().includes(tollProject.trim().toLowerCase())) return false;
+      if (tollChallan.trim() && !(row.challan_id || "").toLowerCase().includes(tollChallan.trim().toLowerCase())) return false;
       if (!inDateRange(row)) return false;
       if (projectFilter && (row.project_name || "") !== projectFilter) return false;
       if (!query) return true;
@@ -542,7 +627,7 @@ export default function Fastag() {
         .toUpperCase()
         .includes(query);
     }).sort((a, b) => compareReads(a, b, sortKey, sortDir)),
-    [sourceReads, seeAllCaptured, tollQuery, dateFrom, timeFrom, dateTo, timeTo, projectFilter, query, sortKey, sortDir],
+    [sourceReads, seeAllCaptured, tollQuery, tollProject, tollChallan, dateFrom, timeFrom, dateTo, timeTo, projectFilter, query, sortKey, sortDir],
   );
   const tableReads = shownReads;
   const pageSize = 15;
@@ -577,6 +662,23 @@ export default function Fastag() {
     }
   }
 
+  async function downloadNotCompleted(ids) {
+    const files = ids.map((id) => Number(id)).filter((id) => id > 0);
+    if (!files.length) {
+      toast.error("Select a sheet");
+      return;
+    }
+    setBusy("not-completed");
+    try {
+      const downloaded = await api.fastagNotCompletedExport(files);
+      toast.success(`Downloaded ${downloaded.filename}`);
+    } catch (error) {
+      toast.error(error.message);
+    } finally {
+      setBusy("");
+    }
+  }
+
   function selectAllExcels() {
     const excel = shownBatches.filter((row) => row.source !== "manual");
     const rows = excel.length ? excel : shownBatches;
@@ -585,6 +687,45 @@ export default function Fastag() {
       return;
     }
     chooseSheets(rows.map((row) => row.id)).catch((error) => toast.error(error.message));
+  }
+
+  function crossingParams() {
+    const params = new URLSearchParams();
+    if (filter.trim()) params.set("q", filter.trim());
+    else if (typedPlate.length >= 4) params.set("q", plate.trim());
+    if (projectFilter) params.set("project", projectFilter);
+    if (tollProject.trim()) params.set("projectText", tollProject.trim());
+    if (tollChallan.trim()) params.set("challan", tollChallan.trim());
+    if (dateFrom) params.set("from", dateFrom);
+    if (dateFrom && timeFrom) params.set("fromTime", timeFrom);
+    if (dateTo) params.set("to", dateTo);
+    if (dateTo && timeTo) params.set("toTime", timeTo);
+    if (tollQuery.trim()) params.set("plaza", tollQuery.trim());
+    if (seeAllCaptured) params.set("allCaptured", "1");
+    return params;
+  }
+
+  function chooseQuarter(nextQuarter, nextYear) {
+    const year = nextYear || "";
+    const previous = quarterBounds(quarterYear, quarter);
+    setQuarter(nextQuarter);
+    setQuarterYear(year);
+    setPicked(null);
+    setPage(1);
+    const range = quarterBounds(year, nextQuarter);
+    if (range) {
+      setDateFrom(range[0]);
+      setDateTo(range[1]);
+      setTimeFrom("");
+      setTimeTo("");
+      return;
+    }
+    if (previous && dateFrom === previous[0] && dateTo === previous[1]) {
+      setDateFrom("");
+      setDateTo("");
+      setTimeFrom("");
+      setTimeTo("");
+    }
   }
 
   async function downloadSelected() {
@@ -599,16 +740,7 @@ export default function Fastag() {
     }
     setBusy("export");
     try {
-      const params = new URLSearchParams();
-      if (filter.trim()) params.set("q", filter.trim());
-      else if (typedPlate.length >= 4) params.set("q", plate.trim());
-      if (projectFilter) params.set("project", projectFilter);
-      if (dateFrom) params.set("from", dateFrom);
-      if (dateFrom && timeFrom) params.set("fromTime", timeFrom);
-      if (dateTo) params.set("to", dateTo);
-      if (dateTo && timeTo) params.set("toTime", timeTo);
-      if (tollQuery.trim()) params.set("plaza", tollQuery.trim());
-      if (seeAllCaptured) params.set("allCaptured", "1");
+      const params = crossingParams();
       const query = params.toString();
       const exported = ids.length === 1
         ? await api.fastagExport(ids[0], query)
@@ -672,6 +804,10 @@ export default function Fastag() {
     setSheetTo("");
     setSheetQuery("");
     setTollQuery("");
+    setTollProject("");
+    setTollChallan("");
+    setQuarterYear("");
+    setQuarter("");
     setShowFetched(false);
     setStoredRows(null);
     setPicked(null);
@@ -879,6 +1015,7 @@ export default function Fastag() {
         <Box title="Vehicle sheet">
           <form onSubmit={previewSheet} className="ft-form" ref={uploadRef}>
             <input
+              key={fileInputKey}
               className="form-control"
               type="file"
               accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv"
@@ -887,6 +1024,14 @@ export default function Fastag() {
             />
             <button className="btn btn-theme" type="submit" disabled={busy === "preview" || busy === "upload"}>
               {busy === "preview" ? "Checking…" : "Check sheet"}
+            </button>
+            <button
+              className="btn btn-default"
+              type="button"
+              disabled={busy === "preview" || busy === "upload" || (!file && !preview && !uploadErrors.length)}
+              onClick={clearVehicleSheet}
+            >
+              Clear
             </button>
           </form>
           {preview ? (
@@ -942,6 +1087,9 @@ export default function Fastag() {
             </button>
             <button type="button" className="btn btn-default btn-sm" title="Download the Excel files that were uploaded" disabled={!uploadedIds.length || busy === "file"} onClick={() => downloadUploaded(uploadedIds)}>
               {busy === "file" ? "Downloading…" : "Download uploaded"}
+            </button>
+            <button type="button" className="btn btn-default btn-sm" title="Download vehicle numbers that have no toll data" disabled={!pickedSheetIds.length || busy === "not-completed"} onClick={() => downloadNotCompleted(pickedSheetIds)}>
+              {busy === "not-completed" ? "Downloading…" : "Download not completed"}
             </button>
             {batch ? (
               <button type="button" className="btn btn-theme btn-sm" title={sheetIds.length === 1 ? "Fetch toll data for this sheet" : "Select one sheet to fetch toll data"} disabled={running || busy === "lookup" || sheetIds.length !== 1} onClick={fetchBatch}>
@@ -1006,8 +1154,9 @@ export default function Fastag() {
                 <th>S.No</th>
                 <th>File</th>
                 <th>Type</th>
-                <th>Vehicles</th>
-                <th>Tolls</th>
+                <th>Trips uploaded</th>
+                <th>Completed trips</th>
+                <th>Not completed trips</th>
                 <th>Updated</th>
                 <th></th>
               </tr>
@@ -1033,17 +1182,23 @@ export default function Fastag() {
                   <td>{row.filename}</td>
                   <td>{row.source === "manual" ? "Search" : "Excel"}</td>
                   <td>{row.vehicle_count}</td>
-                  <td>{row.read_count}</td>
+                  <td>{row.ok_count}</td>
+                  <td>{Math.max(0, Number(row.vehicle_count || 0) - Number(row.ok_count || 0))}</td>
                   <td>{String(row.finished_at || row.created_at || "").replace("T", " ") || "—"}</td>
                   <td>
-                    {row.source === "manual" ? "—" : (
-                      <button type="button" className="btn btn-default btn-sm" disabled={busy === "file"} onClick={() => downloadUploaded([row.id])}>Download</button>
-                    )}
+                    <div className="ft-actions">
+                      {row.source === "manual" ? null : (
+                        <button type="button" className="btn btn-default btn-sm" disabled={busy === "file"} onClick={() => downloadUploaded([row.id])}>Download</button>
+                      )}
+                      {Number(row.vehicle_count || 0) > Number(row.ok_count || 0) ? (
+                        <button type="button" className="btn btn-default btn-sm" title="Vehicle numbers with no toll data" disabled={busy === "not-completed"} onClick={() => downloadNotCompleted([row.id])}>Error Excel</button>
+                      ) : null}
+                    </div>
                   </td>
                 </tr>
               ))}
               {!shownBatches.length ? (
-                <tr><td colSpan={8} className="text-muted">{batches.length ? "No Excel or search was updated in this date range." : "No Excel uploads yet."}</td></tr>
+                <tr><td colSpan={9} className="text-muted">{batches.length ? "No Excel or search was updated in this date range." : "No Excel uploads yet."}</td></tr>
               ) : null}
             </tbody>
           </table>
@@ -1068,11 +1223,14 @@ export default function Fastag() {
                   <th>Challan ID</th>
                   <th>From</th>
                   <th>To</th>
+                  <th>Toll passed</th>
                   <th>Fetched</th>
                 </tr>
               </thead>
               <tbody>
-                {vehicleRows.map((row) => (
+                {vehicleRows.map((row) => {
+                    const passed = passedTollLines(row, reads);
+                    return (
                     <tr key={row.id}>
                       <td>{row.vehicle_reg_no}</td>
                       {many ? <td>{titleForBatch(row.batch_id)}</td> : null}
@@ -1080,11 +1238,21 @@ export default function Fastag() {
                       <td>{row.challan_id || "—"}</td>
                       <td>{row.from_location || "—"}</td>
                       <td>{row.to_location || "—"}</td>
-                      <td>{row.fetched_at || "—"}</td>
+                      <td className="ft-passed">
+                        {passed.length ? passed.map((item) => (
+                          <div key={item.key}>
+                            <strong>{item.name}</strong>
+                            <span>{item.time}</span>
+                            <span>{item.geocode}</span>
+                          </div>
+                        )) : "—"}
+                      </td>
+                      <td>{row.status === "ok" ? (row.fetched_at || "—") : "—"}</td>
                     </tr>
-                ))}
+                    );
+                })}
                 {!vehicleRows.length ? (
-                  <tr><td colSpan={many ? 7 : 6} className="text-muted">No vehicles match this filter.</td></tr>
+                  <tr><td colSpan={many ? 8 : 7} className="text-muted">No vehicles match this filter.</td></tr>
                 ) : null}
               </tbody>
             </table>
@@ -1152,16 +1320,7 @@ export default function Fastag() {
                         : `Exported ${ids.length} selected records in ${exported.filename}`);
                       return;
                     }
-                    const params = new URLSearchParams();
-                    if (filter.trim()) params.set("q", filter.trim());
-                    else if (typedPlate.length >= 4) params.set("q", plate.trim());
-                    if (projectFilter) params.set("project", projectFilter);
-                    if (dateFrom) params.set("from", dateFrom);
-                    if (dateFrom && timeFrom) params.set("fromTime", timeFrom);
-                    if (dateTo) params.set("to", dateTo);
-                    if (dateTo && timeTo) params.set("toTime", timeTo);
-                    if (tollQuery.trim()) params.set("plaza", tollQuery.trim());
-                    if (seeAllCaptured) params.set("allCaptured", "1");
+                    const params = crossingParams();
                     const query = params.toString();
                     const exported = many
                       ? await api.fastagCombinedExport(sheetIds, query)
@@ -1185,7 +1344,7 @@ export default function Fastag() {
           <div className="ft-filter-row">
             <div className="ft-field">
               <span>From date</span>
-              <DateField value={dateFrom} onChange={(value) => { setDateFrom(value); setPicked(null); setPage(1); }} placeholder="Entry from" />
+              <DateField value={dateFrom} onChange={(value) => { setDateFrom(value); setQuarter(""); setPicked(null); setPage(1); }} placeholder="Entry from" />
             </div>
             <div className="ft-field">
               <span>From time</span>
@@ -1193,11 +1352,36 @@ export default function Fastag() {
             </div>
             <div className="ft-field">
               <span>To date</span>
-              <DateField value={dateTo} onChange={(value) => { setDateTo(value); setPicked(null); setPage(1); }} placeholder="Entry to" />
+              <DateField value={dateTo} onChange={(value) => { setDateTo(value); setQuarter(""); setPicked(null); setPage(1); }} placeholder="Entry to" />
             </div>
             <div className="ft-field">
               <span>To time</span>
               <input className="form-control" type="time" step="1" value={timeTo} aria-label="To time" onChange={(event) => { setTimeTo(event.target.value); setPicked(null); setPage(1); }} />
+            </div>
+            <div className="ft-field">
+              <span>Year</span>
+              <select className="form-control" value={quarterYear} aria-label="Year" onChange={(event) => chooseQuarter(quarter, event.target.value)}>
+                <option value="">All years</option>
+                {["2024", "2025", "2026", "2027", "2028"].map((year) => <option key={year} value={year}>{year}</option>)}
+              </select>
+            </div>
+            <div className="ft-field">
+              <span>Quarter</span>
+              <select className="form-control" value={quarter} aria-label="Quarter" onChange={(event) => chooseQuarter(event.target.value, quarterYear || (event.target.value ? String(new Date().getFullYear()) : ""))}>
+                <option value="">All quarters</option>
+                <option value="Q1">Q1 Jan–Mar</option>
+                <option value="Q2">Q2 Apr–Jun</option>
+                <option value="Q3">Q3 Jul–Sep</option>
+                <option value="Q4">Q4 Oct–Dec</option>
+              </select>
+            </div>
+            <div className="ft-field">
+              <span>Project name</span>
+              <input className="form-control" value={tollProject} placeholder="Project name" aria-label="Search by project name" onChange={(event) => { setTollProject(event.target.value); setPicked(null); setPage(1); }} />
+            </div>
+            <div className="ft-field">
+              <span>Challan ID</span>
+              <input className="form-control" value={tollChallan} placeholder="Challan ID" aria-label="Search by challan ID" onChange={(event) => { setTollChallan(event.target.value); setPicked(null); setPage(1); }} />
             </div>
             <div className="ft-field">
               <span>Toll</span>
@@ -1212,7 +1396,7 @@ export default function Fastag() {
             </div>
             <div className="ft-field ft-field-action">
               <span className="ft-field-spacer">Clear</span>
-              <button type="button" className="btn btn-default" onClick={() => { setDateFrom(""); setTimeFrom(""); setDateTo(""); setTimeTo(""); setTollQuery(""); setPicked(null); setPage(1); }}>Clear dates</button>
+              <button type="button" className="btn btn-default" onClick={() => { setDateFrom(""); setTimeFrom(""); setDateTo(""); setTimeTo(""); setTollQuery(""); setTollProject(""); setTollChallan(""); setQuarterYear(""); setQuarter(""); setPicked(null); setPage(1); }}>Clear</button>
             </div>
           </div>
           <div className="table-responsive">
